@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clustering-harness"
+version = "0.1.0"
+description = "LLM-verified clustering of support tickets and other short texts: consensus bank, two-judge gate, residual LLM classification, scoring, report-line rollup and evaluation."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "clustering_harness contributors" }]
+keywords = ["clustering", "llm", "evaluation", "support tickets", "topic discovery", "hdbscan", "umap"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "numpy>=1.26",
+  "pandas>=2.1",
+  "scipy>=1.11",
+  "scikit-learn>=1.4",
+  "umap-learn>=0.5.5",
+  "hdbscan>=0.8.33",
+  "faiss-cpu>=1.7.4",
+  "igraph>=0.11",
+  "leidenalg>=0.10",
+  "pydantic>=2.5",
+  "pyyaml>=6",
+  "requests>=2.31",
+]
+
+[project.optional-dependencies]
+embeddings = ["torch>=2.1", "transformers>=4.40", "sentence-transformers>=2.7"]
+openai = ["openai>=1.30"]
+anthropic = ["anthropic>=0.40"]
+datasets = ["datasets>=2.18"]
+excel = ["openpyxl>=3.1"]
+all = ["clustering-harness[embeddings,openai,anthropic,datasets,excel]"]
+dev = ["pytest>=7.4", "clustering-harness[all]"]
+
+[project.scripts]
+clustering-harness = "clustering_harness.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+clustering_harness = ["presets/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "network: needs internet access (set CH_NETWORK_TESTS=1)",
+  "slow: long-running integration tests",
+]

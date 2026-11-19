@@ -1,0 +1,162 @@
+"""The LLM wrapper used by every algorithm stage.
+
+Contract (identical for all providers):
+
+* :meth:`LLM.chat` returns the response text, ``""`` if the backend failed twice.
+* :meth:`LLM.chat_json` parses the first ``{...}`` object of the response. If parsing fails it asks once
+  more, appending the bad answer and a correction request; if that fails too it returns
+  ``{"_error": ..., "_raw": ...}`` instead of raising, so callers count contract failures explicitly.
+* :meth:`LLM.call` is the cached entry point used by the stages. A *reasoning* model whose answer came
+  back empty (its hidden reasoning used the whole budget) is retried once with a larger budget.
+
+Concurrency is bounded per LLM by a semaphore; :func:`run_parallel` fans jobs out per model."""
+from __future__ import annotations
+
+import json
+import re
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable, Sequence
+
+from .backends import OfflineCallError
+from .base import Backend, BackendError, ChatRequest
+from .budget import Budget, Ledger, Price, price_for
+from .cache import ResponseCache, request_key
+
+__all__ = ["LLM", "run_parallel", "extract_json"]
+
+_JSON = re.compile(r"\{.*\}", re.S)
+
+
+def extract_json(raw: str) -> dict:
+    """First-to-last brace span of ``raw`` parsed as JSON (raises on failure)."""
+    return json.loads(_JSON.search(raw).group(0))
+
+
+class LLM:
+    """A configured model slot.
+
+    Parameters
+    ----------
+    backend:
+        Provider adapter (see :mod:`clustering_harness.llm.backends`).
+    name:
+        Short logical name used in logs (e.g. ``"a"``/``"b"`` or ``"qwen"``).
+    cache:
+        Shared :class:`ResponseCache`; ``None`` disables caching.
+    max_concurrency:
+        Maximum simultaneous requests to this model from this process.
+    reasoning:
+        Model spends hidden reasoning tokens from the generation budget (e.g. gpt-oss). Enables the
+        empty-answer budget retry and text-mode judging.
+    budget_usd, ledger, price:
+        Optional hard spend cap. ``price`` defaults to the known price for the backend's model name.
+    """
+
+    def __init__(self, backend: Backend, name: str | None = None, cache: ResponseCache | None = None,
+                 max_concurrency: int = 2, reasoning: bool = False, budget_usd: float | None = None,
+                 ledger: Ledger | None = None, price: Price | None = None, transport_retries: int = 2):
+        self.backend = backend
+        self.name = name or backend.model_id
+        self.cache = cache
+        self.reasoning = reasoning
+        self.max_concurrency = max_concurrency
+        self._sem = threading.BoundedSemaphore(max_concurrency)
+        self.price = price or price_for(getattr(backend, "model", ""))
+        self.ledger = ledger
+        self.budget = Budget(budget_usd, ledger, backend.model_id) if (budget_usd is not None and ledger is not None) else None
+        self.transport_retries = transport_retries
+        self.stats = {"requests": 0, "cache_hits": 0, "failures": 0, "input_tokens": 0, "output_tokens": 0}
+        self._stats_lock = threading.Lock()
+
+    @property
+    def model_id(self) -> str:
+        return self.backend.model_id
+
+    # ------------------------------------------------------------------ raw calls
+    def chat(self, messages: list, max_tokens: int = 800, temperature: float = 0.0, seed: int = 0,
+             json_mode: bool = False, stage: str = "") -> str:
+        if self.budget is not None:
+            self.budget.check()
+        req = ChatRequest(messages=messages, max_tokens=max_tokens, temperature=temperature, seed=seed, json_mode=json_mode)
+        for attempt in range(self.transport_retries):
+            try:
+                with self._sem:
+                    res = self.backend.complete(req)
+            except OfflineCallError:
+                raise
+            except BackendError:
+                with self._stats_lock:
+                    self.stats["failures"] += 1
+                continue
+            with self._stats_lock:
+                self.stats["requests"] += 1
+                self.stats["input_tokens"] += res.input_tokens
+                self.stats["output_tokens"] += res.output_tokens
+            if self.ledger is not None:
+                self.ledger.record(self.model_id, self.model_id, stage, res.input_tokens, res.output_tokens,
+                                   self.price.cost(res.input_tokens, res.output_tokens))
+            return res.text
+        return ""
+
+    def chat_json(self, messages: list, max_tokens: int = 800, temperature: float = 0.0, seed: int = 0, stage: str = "") -> dict:
+        raw = self.chat(messages, max_tokens, temperature, seed, json_mode=True, stage=stage)
+        for attempt in range(2):
+            try:
+                return extract_json(raw)
+            except Exception as e:  # noqa: BLE001 - any parse failure is a contract failure
+                if attempt == 1:
+                    return {"_error": f"unparseable after retry: {str(e)[:80]}", "_raw": raw[:300]}
+                raw = self.chat(messages + [{"role": "assistant", "content": raw[:2000]},
+                                            {"role": "user", "content": f"That was not valid JSON ({str(e)[:80]}). Reply with the JSON object only."}],
+                                max_tokens, temperature, seed, json_mode=True, stage=stage)
+        return {"_error": "unreachable"}
+
+    # ------------------------------------------------------------------ cached stage entry point
+    def call(self, stage: str, messages: list, max_tokens: int = 600, seed: int = 0, as_json: bool = True,
+             temperature: float = 0.0, tag: str = "") -> dict:
+        """Cached call. Returns the parsed JSON dict (``as_json``) or ``{"text": ...}``."""
+        key = request_key(self.model_id, messages, max_tokens, seed, as_json, temperature)
+        if self.cache is not None:
+            hit = self.cache.get(key)
+            if hit is not None:
+                with self._stats_lock:
+                    self.stats["cache_hits"] += 1
+                return hit
+        t0 = time.time()
+        n_calls = 1
+        if as_json:
+            out = self.chat_json(messages, max_tokens, temperature, seed, stage=stage)
+            if "_error" in out and self.reasoning and not out.get("_raw") and max_tokens < 2400:
+                n_calls += 1
+                out = self.chat_json(messages, min(4000, max(2400, int(max_tokens * 2.5))), temperature, seed, stage=stage)
+        else:
+            out = {"text": self.chat(messages, max_tokens, temperature, seed, stage=stage)}
+        if self.cache is not None:
+            self.cache.put(key, out, model=self.model_id, stage=stage, tag=tag, n_calls=n_calls, secs=round(time.time() - t0, 2))
+        return out
+
+    def cache_key(self, messages: list, max_tokens: int, seed: int = 0, as_json: bool = True, temperature: float = 0.0) -> str:
+        return request_key(self.model_id, messages, max_tokens, seed, as_json, temperature)
+
+    def __repr__(self) -> str:
+        return f"LLM({self.name!r}, {self.model_id!r}, concurrency={self.max_concurrency}, reasoning={self.reasoning})"
+
+
+def run_parallel(jobs: Sequence[Any], fn: Callable[[Any], Any], llm_of: Callable[[Any], LLM],
+                 workers_per_llm: int | None = None) -> list:
+    """Run ``fn(job)`` for every job, with a thread pool per target LLM. Results keep job order."""
+    pools: dict[int, ThreadPoolExecutor] = {}
+    futs = []
+    for jb in jobs:
+        m = llm_of(jb)
+        p = pools.get(id(m))
+        if p is None:
+            p = pools[id(m)] = ThreadPoolExecutor(workers_per_llm or max(1, m.max_concurrency * 2))
+        futs.append(p.submit(fn, jb))
+    try:
+        return [f.result() for f in futs]
+    finally:
+        for p in pools.values():
+            p.shutdown()

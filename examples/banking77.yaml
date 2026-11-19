@@ -1,0 +1,18 @@
+# Benchmark run on the public BANKING77 test split (3,080 queries, 77 gold intents; CC-BY-4.0).
+#   clustering-harness run examples/banking77.yaml
+#   clustering-harness compare examples/banking77.yaml --baselines kmeans:k=77 umap_hdbscan:min_cluster_size=10 leiden_knn:resolution=1.0 --judge --judge-max-clusters 40
+# Needs OPENAI_API_KEY (and ANTHROPIC_API_KEY if you switch slot a to Claude).
+workdir: runs/banking77
+data: {dataset: banking77, split: test}
+pipeline:
+  preset: small
+  prompts: default
+  domain:
+    product: a digital bank
+    product_description: "a mobile banking app: cards, top-ups, transfers, payments, exchange rates, identity verification and account security"
+models:
+  a: {name: haiku, backend: anthropic, model: claude-haiku-5-5, effort: low, concurrency: 8, budget_usd: 5}
+  b: {name: gpt-4o-mini, backend: openai, model: gpt-4o-mini, concurrency: 8, budget_usd: 5}
+embedder: {backend: hf, model: Alibaba-NLP/gte-large-en-v1.5}
+label_embedder: {backend: st, model: BAAI/bge-large-en-v1.5, device: cpu}
+ledger: ~/.cache/clustering_harness/spend.sqlite
