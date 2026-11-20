@@ -148,8 +148,8 @@ class OpenAICompatibleBackend:
         try:
             r = client.chat.completions.create(**kw)
         except Exception as e:  # noqa: BLE001
-            import openai
-            if isinstance(e, (openai.AuthenticationError, openai.PermissionDeniedError, openai.NotFoundError)):
+            # 401 invalid key, 403 no access, 404 unknown model/deployment: retrying cannot help
+            if getattr(e, "status_code", None) in (401, 403, 404):
                 raise BackendConfigError(f"openai {self.model}: {str(e)[:300]}") from e
             raise BackendError(f"openai {self.model}: {str(e)[:200]}") from e
         u = r.usage

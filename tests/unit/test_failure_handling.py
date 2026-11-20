@@ -117,3 +117,29 @@ def test_keys_echoed_by_providers_are_redacted(tmp_path, caplog):
         llm.chat(MSG)
     assert "sk-proj" not in str(e.value) and "sk-proj" not in caplog.text and "[redacted-key]" in str(e.value)
     assert e.value.__cause__ is None and e.value.__suppress_context__        # the raw message is not chained either
+
+
+def test_openai_status_codes_are_classified_without_the_sdk():
+    from types import SimpleNamespace
+
+    from clustering_harness.llm import ChatRequest, OpenAICompatibleBackend
+
+    class StatusError(Exception):
+        def __init__(self, code):
+            super().__init__(f"Error code: {code}")
+            self.status_code = code
+
+    def backend(code):
+        be = OpenAICompatibleBackend("gpt-4o-mini", api_key="k")
+        be._client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+            create=lambda **kw: (_ for _ in ()).throw(StatusError(code)))))
+        return be
+
+    req = ChatRequest(messages=MSG)
+    for code in (401, 403, 404):
+        with pytest.raises(BackendConfigError):
+            backend(code).complete(req)
+    for code in (429, 500):
+        with pytest.raises(BackendError) as e:
+            backend(code).complete(req)
+        assert not isinstance(e.value, BackendConfigError)
