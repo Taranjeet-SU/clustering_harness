@@ -1,6 +1,6 @@
 """Cluster your own CSV of support tickets with local Ollama models.
 
-    pip install "clustering-harness[embeddings]"
+    pip install -e ".[embeddings]"          (from a clone of the repository; see the README)
     ollama pull qwen3:8b && ollama pull gpt-oss:20b
     python examples/quickstart.py tickets.csv
 

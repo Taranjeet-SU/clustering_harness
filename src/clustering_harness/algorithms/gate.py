@@ -17,12 +17,15 @@ from __future__ import annotations
 
 from typing import Sequence
 
+import logging
+
 import numpy as np
 
 from ..context import RunContext
 
 __all__ = ["Gate"]
 
+log = logging.getLogger("clustering_harness")
 JUDGES = ("a", "b")
 
 
@@ -66,8 +69,19 @@ class Gate:
         for j in JUDGES:
             v = [c["score"] for c in calls if c["ok"] and c["judge"] == j]
             if not v:
-                raise RuntimeError(f"gate calibration: judge {j!r} returned no valid score")
+                n = sum(1 for c in calls if c["judge"] == j)
+                raise RuntimeError(f"gate calibration: judge {j!r} returned no valid score in {n} calls (every answer "
+                                   f"failed the JSON contract). Look at the model's raw answers under <workdir>/results/; "
+                                   f"a model that cannot follow the JSON instructions needs reasoning: true, more tokens, or "
+                                   f"a different model")
             b[j] = {"mu": float(np.mean(v)), "sd": float(np.std(v)) or 1.0, "n": len(v)}
+            if len(v) >= 5 and float(np.std(v)) == 0.0:
+                b[j]["constant"] = True
+                log.warning("gate calibration: judge %r gave every calibration group the same score (%s); its scores "
+                            "cannot tell good groups from bad ones and the gate will rely on the other judge's spread. "
+                            "Check the model (a stub, a broken prompt, or a model too weak to judge).", j, v[0])
+        if all(b[j].get("constant") for j in JUDGES):
+            log.warning("gate calibration: BOTH judges gave constant scores; gate decisions will not be meaningful")
         allv = [c["score"] for c in calls if c["ok"]]
         b["pooled_mu"] = float(np.mean(allv))
         b["pooled_sd"] = float(np.std(allv)) or 1.0   # a uniform calibration batch would otherwise collapse every adjusted score

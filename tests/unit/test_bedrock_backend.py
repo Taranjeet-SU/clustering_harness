@@ -85,7 +85,16 @@ def test_access_keys_sign_requests_and_map_messages(server):
     body = req["body"]
     assert body["system"] == [{"text": "be brief"}]
     assert body["messages"] == [{"role": "user", "content": [{"text": "hello"}, {"text": "again"}]}]   # same-role turns merged
-    assert body["inferenceConfig"] == {"maxTokens": 50, "temperature": 0.0}
+    assert body["inferenceConfig"] == {"maxTokens": 50}      # no temperature for Claude models (they reject it)
+
+
+def test_temperature_is_sent_to_non_claude_models_and_can_be_forced(server):
+    creds = {"aws_access_key_id": "AKIA1", "aws_secret_access_key": "s"}
+    BedrockBackend("meta.llama3-70b-instruct-v1:0", region="us-east-1", endpoint_url=server.url, credentials=creds).complete(REQ)
+    assert server.requests[-1]["body"]["inferenceConfig"] == {"maxTokens": 50, "temperature": 0.0}
+    BedrockBackend("anthropic.claude-x", region="us-east-1", endpoint_url=server.url, credentials=creds,
+                   send_temperature=True).complete(REQ)
+    assert server.requests[-1]["body"]["inferenceConfig"]["temperature"] == 0.0
 
 
 def test_sts_style_keys_with_session_token(server):

@@ -19,8 +19,12 @@ import os
 from pathlib import Path
 from typing import Protocol, Sequence, runtime_checkable
 
+import logging
+import time
+
 import numpy as np
 
+log = logging.getLogger("clustering_harness")
 __all__ = ["Embedder", "HFTransformerEmbedder", "SentenceTransformerEmbedder", "OllamaEmbedder", "OpenAIEmbedder",
            "PrecomputedEmbedder", "CachedEmbedder", "l2_normalize"]
 
@@ -136,6 +140,7 @@ class HFTransformerEmbedder:
         enc = tok(texts, truncation=True, max_length=self.max_length, add_special_tokens=True)["input_ids"]
         raw_len = np.array([len(x) for x in tok(texts, truncation=False, add_special_tokens=True)["input_ids"]])
         lengths = np.array([len(x) for x in enc])
+        log.info("embed: loading %s on %s", self.model, dev)
         am = AutoModel.from_pretrained(self.model, trust_remote_code=self.trust_remote_code, local_files_only=self.local_files_only,
                                        dtype=torch.float32).to(dev).eval()
         _fix_gte_buffers(am)
@@ -144,6 +149,7 @@ class HFTransformerEmbedder:
         dim = am.config.hidden_size
         out = np.zeros((len(texts), dim), dtype=np.float16 if self.store_float16 else np.float32)
         pad = tok.pad_token_id if tok.pad_token_id is not None else 0
+        done, next_report, t0 = 0, 0.1, time.time()
         for rows in _token_budget_batches(lengths, self.batch_tokens):
             L = int(lengths[rows].max())
             ids_t = torch.full((len(rows), L), pad, dtype=torch.long)
@@ -164,6 +170,10 @@ class HFTransformerEmbedder:
                     h = torch.cat([run(ids_t[j:j + 1], mask[j:j + 1]) for j in range(len(rows))])
                 h = torch.nn.functional.normalize(h.float(), dim=-1).cpu().numpy()
             out[rows] = h.astype(out.dtype)
+            done += len(rows)
+            if len(texts) and done / len(texts) >= next_report:
+                log.info("embed: %d/%d records (%.0f%%, %.1f min)", done, len(texts), 100 * done / len(texts), (time.time() - t0) / 60)
+                next_report = min(1.0, done / len(texts) + 0.1)
         am = None
         if dev.startswith("cuda"):
             torch.cuda.empty_cache()

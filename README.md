@@ -90,10 +90,13 @@ clustering-harness -v run examples/banking77.yaml
 query. Then compare the result with classic clustering and the true labels:
 
 ```bash
-clustering-harness compare examples/banking77.yaml --baselines kmeans:k=77 umap_hdbscan:min_cluster_size=10
+clustering-harness compare examples/banking77.yaml --baselines kmeans:k=77 agglomerative_cosine_average:k=77 \
+    umap_hdbscan:min_cluster_size=10 hdbscan:min_cluster_size=10 leiden_knn:resolution=1.0
 ```
 
-This reruns nothing: every model answer is cached, so it only adds the baselines.
+This reruns nothing: every model answer is cached, so it only adds the baselines. It writes
+`runs/banking77/output/comparison.csv`, with one row per partition. `pipeline_clusters` is the pipeline row of
+the Validation table. Add `--judge --judge-max-clusters 40` for the LLM-judge column (about $0.10).
 
 **Now with your own data.** Create a starter spec, edit the marked lines and run it:
 
@@ -189,11 +192,15 @@ ds = Dataset.from_mongo(
     title_field="subject",
     label_field="category",                    # optional gold labels for evaluation
     meta_fields=["product", "priority"],       # kept as extra columns
-    limit=5000,
+    limit=5000,                                # read at most 5,000 documents, collections in the order given
 )
 ds = Dataset.from_mongo("tickets", database="support", text_field="text",
                         pipeline=[{"$match": {"lang": "en"}}, {"$sample": {"size": 3000}}])   # aggregation pipeline
 ```
+
+`limit` caps how many documents are read, in collection order. For a reproducible *random* sample across
+all collections, set `limit:` (and `seed:`) at the `data:` level of a run spec instead. The pipeline then
+samples after loading.
 
 In a run spec:
 
@@ -297,6 +304,15 @@ register_backend("gateway", lambda opts: GatewayBackend(opts.pop("model"), opts.
 # or in your package's pyproject.toml:  [project.entry-points."clustering_harness.backends"]  gateway = "my_company.llm:make"
 ```
 
+An import path only works if Python can import the module. The command line adds the current folder and the
+folder of the run spec, so a `my_backend.py` next to `run.yaml` just works. Anything else must be installed
+(`pip install -e path/to/your/package`) or on `PYTHONPATH`.
+
+**When a model fails.** Every failed request is logged, and a failed request is never cached: a rerun asks
+again. A configuration problem (invalid key, no permission, unknown model, missing region) stops the run at
+once with the provider's message. So do 8 failed requests in a row (`max_consecutive_failures`), so a
+broken server cannot burn through the dataset.
+
 **Which models?** Small and mid-size models work: the validation runs used a 27B Qwen model with
 `gpt-oss:20b` locally, and `gpt-4o-mini`. Two *different* models in `a` and `b` make the two-judge checks
 meaningful. With the same model in both slots the two judges usually agree, and quality scores come out
@@ -306,7 +322,7 @@ inflated (section 13).
 
 | backend | example | notes |
 |---|---|---|
-| `hf` | `{backend: hf, model: Alibaba-NLP/gte-large-en-v1.5}` | any Hugging Face encoder; runs on CPU by default |
+| `hf` | `{backend: hf, model: Alibaba-NLP/gte-large-en-v1.5}` | any Hugging Face encoder; runs on CPU by default. `trust_remote_code` is on by default because the GTE models ship their own model code; it runs code from the model's Hugging Face repository, so set `trust_remote_code: false` for models that don't need it |
 | `st` | `{backend: st, model: BAAI/bge-large-en-v1.5}` | sentence-transformers models |
 | `openai` | `{backend: openai, model: text-embedding-3-large}` | hosted |
 | `ollama` | `{backend: ollama, model: bge-m3}` | local server |
@@ -340,8 +356,14 @@ replace its generic anchor examples with paraphrased examples from your own data
 - Every hosted request is priced (prices for common models are built in; set `price_in` / `price_out` for
   others) and written to the **ledger**. By default the ledger is `<workdir>/spend.sqlite`, so
   `budget_usd` caps the spend **of that run**.
+- A cap applies **per model** within a ledger. If slots `a` and `b` both use `gpt-4o-mini` with
+  `budget_usd: 5`, they share one $5 cap. `multirun` seeds share the main run's ledger, so the cap covers
+  all seeds together.
 - Set `ledger: ~/.cache/clustering_harness/spend.sqlite` in several specs to cap their **combined** spend
   instead, for example for a team-wide monthly limit.
+- Requests in flight are counted against the cap before they are sent (a conservative estimate from the
+  prompt length and `max_tokens`), so parallel requests cannot overshoot it. The run may stop slightly
+  below the cap.
 - When a cap is reached, the run stops with `BudgetExceeded`. Raise the cap and rerun: cached answers are
   free, so you only pay for the rest.
 - If a hosted model's price is unknown, the budget cannot be enforced and a warning says so.
@@ -414,7 +436,11 @@ table = compare_partitions({"pipeline": result.labels(), "kmeans": run_baseline(
 | symptom | fix |
 |---|---|
 | `CUDA out of memory` while embedding | the embedder uses the CPU unless you set `device: cuda`; remove it, or free the GPU |
-| `... holds a run with a different config or dataset` | a workdir belongs to one configuration; use a new `workdir` after changing settings or data |
+| `... holds a run with a different ...` | a workdir belongs to one dataset, configuration, model pair and embedder (all checked); use a new `workdir` after changing any of them |
+| `ModelUnavailableError: ... cannot be used` | the provider rejected the settings (key, permission, model name, region); fix them and rerun. Nothing failed was cached |
+| `ModelUnavailableError: ... requests in a row failed` | the server is down, unreachable or rate-limiting; the log shows each error. Rerun when it's back |
+| `ModuleNotFoundError` for a `module:Class` backend | put the module next to the run spec, install your package, or add it to `PYTHONPATH` |
+| warning `judge 'a' gave every calibration group the same score` | that model is not really judging (a stub, a broken prompt, or a model too weak for the task); use another model |
 | `BudgetExceeded` | raise `budget_usd` and rerun; finished work is cached |
 | warning `budget_usd ... cannot be enforced` | set `price_in` / `price_out` for that model |
 | local models are slow | lower `concurrency` to what your GPU serves, or use a smaller model for one slot |
@@ -519,7 +545,9 @@ compatibility with recent transformers, this example config, and these docs.
 - **Lenient judges.** With `gpt-4o-mini` as both judges, the LLM coherence evaluation is near ceiling for
   every partition (gold 4.98, pipeline 4.98, k-means 4.93), so it cannot separate good from mediocre
   clusters on short, clean queries. Use a stricter judge pair when the LLM evaluation has to
-  discriminate. A run with local open-weight judges is in progress.
+  discriminate. With two different local models as judges (a 27B Qwen model and `gpt-oss:20b`), the
+  clustering is just as good (ARI 0.614, NMI 0.855). The judge scores spread a little more (k-means 4.78,
+  Leiden 4.74, pipeline 4.93) but are still near ceiling.
 - **Run-to-run variation.** Results depend on embedding numerics and model non-determinism. Compare
   runs with `clustering-harness multirun` rather than expecting identical partitions.
 - **Not yet benchmarked end to end:** Anthropic, Bedrock, Azure and Gemini backends. They are implemented and

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -97,9 +98,14 @@ def build_bank(ctx: RunContext) -> tuple[pd.DataFrame, np.ndarray]:
                             if gp.exists():
                                 Z = np.load(gp)
                             else:
-                                Z = umap.UMAP(n_components=B.umap_components, n_neighbors=nn, min_dist=0.0, metric="cosine",
-                                              random_state=seed,
-                                              precomputed_knn=(I[:, :nn].copy(), np.maximum(0, 1 - D[:, :nn]).copy(), None)).fit_transform(X)
+                                with warnings.catch_warnings():
+                                    # expected: we pass exact neighbours (no NNDescent index) and a fixed seed
+                                    warnings.filterwarnings("ignore", message=".*precomputed_knn.*")
+                                    warnings.filterwarnings("ignore", message=".*overridden to 1 by setting random_state.*")
+                                    Z = umap.UMAP(n_components=B.umap_components, n_neighbors=nn, min_dist=0.0, metric="cosine",
+                                                  random_state=seed,
+                                                  precomputed_knn=(I[:, :nn].copy(), np.maximum(0, 1 - D[:, :nn]).copy(), None)
+                                                  ).fit_transform(X)
                                 np.save(gp, Z)
                         tree = hdbscan.HDBSCAN(min_cluster_size=B.tree_min_cluster_size, min_samples=ms,
                                                core_dist_n_jobs=B.workers).fit(Z).single_linkage_tree_.to_numpy()

@@ -35,7 +35,7 @@ import threading
 import time
 from typing import Callable
 
-from .base import BackendError, ChatRequest, ChatResult
+from .base import BackendConfigError, BackendError, ChatRequest, ChatResult
 
 __all__ = ["BedrockBackend", "resolve_callable"]
 
@@ -55,6 +55,8 @@ _ALIASES = {
 _KEYS = {"aws_access_key_id", "aws_secret_access_key", "aws_session_token", "expiration", "aws_bearer_token_bedrock",
          "region", "role_arn", "external_id", "role_session_name", "profile_name", "model_id", "inference_profile_arn"}
 _EXPIRED = {"ExpiredTokenException", "ExpiredToken", "UnrecognizedClientException", "InvalidSignatureException"}
+_FATAL = _EXPIRED | {"AccessDeniedException", "ResourceNotFoundException", "UnauthorizedException", "AccessDenied",
+                     "InvalidClientTokenId", "SignatureDoesNotMatch"}
 
 
 def resolve_callable(ref):
@@ -101,7 +103,7 @@ class BedrockBackend:
                  role_arn: str | None = None, external_id: str | None = None, role_session_name: str = "clustering-harness",
                  role_duration_seconds: int = 3600, bearer_token: str | None = None,
                  bearer_token_env: str = "AWS_BEARER_TOKEN_BEDROCK", max_tokens_cap: int = 8192,
-                 send_temperature: bool = True, additional_model_request_fields: dict | None = None,
+                 send_temperature: bool | None = None, additional_model_request_fields: dict | None = None,
                  timeout: float = 120, max_retries: int = 6, refresh_margin_seconds: int = 300, endpoint_url: str | None = None):
         self._provider = resolve_callable(credentials_provider)
         args = {"aws_access_key_id": aws_access_key_id, "aws_secret_access_key": aws_secret_access_key,
@@ -114,7 +116,10 @@ class BedrockBackend:
         self.role_duration_seconds = role_duration_seconds
         self.bearer_token_env = bearer_token_env
         self.max_tokens_cap = max_tokens_cap
-        self.send_temperature = send_temperature
+        # Current Anthropic models reject non-default sampling parameters, so temperature is not sent to Claude
+        # models unless asked for; other model families get it (reproducibility then relies on the cache).
+        self.send_temperature = send_temperature if send_temperature is not None else not any(
+            k in self.model.lower() for k in ("anthropic", "claude"))
         self.additional_model_request_fields = additional_model_request_fields
         self.timeout = timeout
         self.max_retries = max_retries
@@ -132,7 +137,7 @@ class BedrockBackend:
         if self._provider is not None:
             got = self._provider()
             if not isinstance(got, dict):
-                raise BackendError("bedrock credentials_provider must return a dict")
+                raise BackendConfigError("bedrock credentials_provider must return a dict")
             creds.update(_normalise(got))
             if "inference_profile_arn" in creds or "model_id" in creds:
                 self.model = creds.pop("inference_profile_arn", None) or creds.pop("model_id")
@@ -140,7 +145,7 @@ class BedrockBackend:
             creds["aws_bearer_token_bedrock"] = os.environ[self.bearer_token_env]
         creds.setdefault("region", self.region or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION"))
         if not creds["region"]:
-            raise BackendError("bedrock: no region (set `region`, a credentials `region`, or AWS_REGION)")
+            raise BackendConfigError("bedrock: no region (set `region`, a credentials `region`, or AWS_REGION)")
         return creds
 
     def _config(self, unsigned: bool = False):
@@ -221,15 +226,31 @@ class BedrockBackend:
             kw["system"] = system
         if self.additional_model_request_fields:
             kw["additionalModelRequestFields"] = self.additional_model_request_fields
+        from botocore.exceptions import NoCredentialsError, NoRegionError, PartialCredentialsError
         for attempt in range(2):
             try:
-                r = self._get(force=attempt > 0).converse(**kw)
+                client = self._get(force=attempt > 0)
+            except BackendError:
+                raise
+            except ClientError as e:          # e.g. STS AssumeRole refused
+                code = e.response.get("Error", {}).get("Code", "")
+                raise BackendConfigError(f"bedrock: could not obtain credentials: {code}: {str(e)[:300]}") from e
+            except (NoCredentialsError, PartialCredentialsError, NoRegionError) as e:
+                raise BackendConfigError(f"bedrock: {e}") from e
+            except Exception as e:  # noqa: BLE001 - a failing credentials_provider, bad profile name, ...
+                raise BackendConfigError(f"bedrock: could not build a client: {type(e).__name__}: {str(e)[:300]}") from e
+            try:
+                r = client.converse(**kw)
                 break
             except ClientError as e:
                 code = e.response.get("Error", {}).get("Code", "")
                 if attempt == 0 and code in _EXPIRED and (self._provider is not None or "role_arn" in self._static):
                     continue
-                raise BackendError(f"bedrock {self.model}: {code}: {str(e)[:200]}") from e
+                err = BackendConfigError if code in _FATAL else BackendError
+                raise err(f"bedrock {self.model}: {code}: {str(e)[:300]}") from e
+            except (NoCredentialsError, PartialCredentialsError) as e:
+                raise BackendConfigError(f"bedrock: {e} (no AWS credentials found: set credentials, a profile, a role or a "
+                                         f"Bedrock API key)") from e
             except BotoCoreError as e:
                 raise BackendError(f"bedrock {self.model}: {str(e)[:200]}") from e
         content = r.get("output", {}).get("message", {}).get("content", [])

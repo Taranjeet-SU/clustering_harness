@@ -90,10 +90,14 @@ class Budget:
         self.ledger = ledger
         self.scope = scope
 
-    def check(self) -> None:
+    def check(self, reserved: float = 0.0, request_estimate: float = 0.0) -> None:
+        """Raise :class:`BudgetExceeded` if the recorded spend, plus the estimated cost of requests already in
+        flight (``reserved``) and of the next request, would pass the cap. Reserving in-flight costs keeps
+        parallel requests from overshooting the cap."""
         spent = self.ledger.spent(self.scope)
-        if spent >= self.limit_usd:
-            raise BudgetExceeded(f"budget for {self.scope!r} exhausted: ${spent:.4f} of ${self.limit_usd:.2f}")
+        if spent + reserved + request_estimate > self.limit_usd or spent >= self.limit_usd:
+            raise BudgetExceeded(f"budget for {self.scope!r} exhausted: ${spent:.4f} spent (+${reserved:.4f} in flight) "
+                                 f"of ${self.limit_usd:.2f}")
 
     def remaining(self) -> float:
         return self.limit_usd - self.ledger.spent(self.scope)

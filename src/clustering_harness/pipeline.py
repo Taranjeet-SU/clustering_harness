@@ -59,6 +59,16 @@ class ClusteringResult:
 
 
 
+
+
+def _data_fingerprint(ds: Dataset) -> str:
+    """Hash of the records the run sees (ids, titles, texts in order)."""
+    import hashlib
+    h = hashlib.sha256()
+    for rid, t, x in zip(ds.ids, ds.titles, ds.texts):
+        h.update(json.dumps([rid, t, x]).encode())
+    return h.hexdigest()[:20]
+
 def _environment() -> dict:
     """Versions that can change embeddings or clusterings numerically."""
     import platform
@@ -113,7 +123,11 @@ class Pipeline:
             if self.embedder is None:
                 raise ValueError("an embedder (or precomputed vectors) is required")
             t = self.cfg.text
+            name = getattr(self.embedder, "name", type(self.embedder).__name__)
+            log.info("embed: %d records with %s (the first run downloads the model; later runs use the cache)", len(ds), name)
+            t0 = time.time()
             X = l2_normalize(self.embedder.encode(ds.embedding_texts(TextTemplate(t.embed_with_title, t.embed_without_title))))
+            log.info("embed: done in %.1f min", (time.time() - t0) / 60)
         if len(X) != len(ds) or not np.isfinite(X).all():
             raise ValueError("embeddings must be finite, one row per record")
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -140,12 +154,16 @@ class Pipeline:
 
     # ------------------------------------------------------------------ run
     def run(self, ds: Dataset, until: str | None = None) -> ClusteringResult | None:
+        """Run (or resume) the pipeline. ``until`` stops after one of :data:`STAGES`."""
         T0 = time.time()
+        if until is not None and until not in STAGES:
+            raise ValueError(f"unknown stage {until!r} for until; stages are: {', '.join(STAGES)}")
         if len(ds) == 0:
             raise ValueError(f"dataset {ds.name!r} has no records (check the file, query or collection names)")
         wd = self.workdir
         wd.mkdir(parents=True, exist_ok=True)
-        manifest = {"dataset": ds.name, "records": len(ds), "config_fingerprint": self.cfg.fingerprint(),
+        manifest = {"dataset": ds.name, "records": len(ds), "data_fingerprint": _data_fingerprint(ds),
+                    "config_fingerprint": self.cfg.fingerprint(),
                     "models": {k: m.model_id for k, m in self.llms.items()},
                     "embedder": getattr(self.embedder, "name", "precomputed" if self.vectors is not None else None),
                     "label_embedder": getattr(self.label_embedder, "name", None),
@@ -155,8 +173,11 @@ class Pipeline:
         if old.exists():
             prev = json.loads(old.read_text())
             manifest["first_run_environment"] = prev.get("first_run_environment") or prev.get("environment")
-            if prev.get("config_fingerprint") != manifest["config_fingerprint"] or prev.get("records") != len(ds):
-                raise ValueError(f"{wd} holds a run with a different config or dataset; use a new workdir")
+            changed = [k for k in ("records", "data_fingerprint", "config_fingerprint", "models", "embedder", "label_embedder")
+                       if k in prev and prev[k] != manifest[k]]
+            if changed:
+                raise ValueError(f"{wd} holds a run with a different {', '.join(changed)}; its cached stages would be "
+                                 f"mixed with the new settings. Use a new workdir (or delete this one).")
         manifest["first_run_environment"] = manifest.get("first_run_environment") or manifest["environment"]
         write_json(manifest, old)
         self.cfg.to_file(wd / "config.yaml")

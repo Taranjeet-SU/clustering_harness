@@ -6,11 +6,21 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-__all__ = ["ChatRequest", "ChatResult", "Backend", "BackendError"]
+__all__ = ["ChatRequest", "ChatResult", "Backend", "BackendError", "BackendConfigError", "ModelUnavailableError"]
 
 
 class BackendError(RuntimeError):
     """A backend could not produce a response (after its own transport retries)."""
+
+
+class BackendConfigError(BackendError):
+    """A failure that retrying cannot fix: missing or invalid credentials, no permission, unknown model,
+    missing region. Backends raise it so that a run stops at once with the provider's message."""
+
+
+class ModelUnavailableError(BackendError):
+    """Raised by :class:`~clustering_harness.llm.client.LLM` when a model cannot be used: a configuration error,
+    or too many consecutive failed requests. The pipeline stops; nothing about the failed requests is cached."""
 
 
 @dataclass(frozen=True)

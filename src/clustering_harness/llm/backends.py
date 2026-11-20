@@ -14,7 +14,7 @@ import os
 import threading
 from typing import Callable
 
-from .base import BackendError, ChatRequest, ChatResult
+from .base import BackendConfigError, BackendError, ChatRequest, ChatResult
 
 __all__ = ["OllamaBackend", "OpenAICompatibleBackend", "AnthropicBackend", "CallableBackend", "OfflineBackend",
            "OfflineCallError"]
@@ -58,6 +58,12 @@ class OllamaBackend:
             body["keep_alive"] = self.keep_alive
         try:
             r = self._http().post(self.url + "/api/chat", json=body, timeout=self.timeout)
+        except Exception as e:  # noqa: BLE001 - connection problems are retryable
+            raise BackendError(f"ollama {self.model} at {self.url}: {str(e)[:200]}") from e
+        if r.status_code == 404:
+            raise BackendConfigError(f"ollama: model {self.model!r} not found at {self.url} (run `ollama pull {self.model}`): "
+                                     f"{r.text[:200]}")
+        try:
             r.raise_for_status()
             j = r.json()
         except Exception as e:  # noqa: BLE001
@@ -136,8 +142,15 @@ class OpenAICompatibleBackend:
         if request.json_mode and self.supports_json_mode:
             kw["response_format"] = {"type": "json_object"}
         try:
-            r = self._get().chat.completions.create(**kw)
+            client = self._get()
+        except Exception as e:  # noqa: BLE001 - e.g. no API key
+            raise BackendConfigError(f"openai {self.model}: {str(e)[:300]}") from e
+        try:
+            r = client.chat.completions.create(**kw)
         except Exception as e:  # noqa: BLE001
+            import openai
+            if isinstance(e, (openai.AuthenticationError, openai.PermissionDeniedError, openai.NotFoundError)):
+                raise BackendConfigError(f"openai {self.model}: {str(e)[:300]}") from e
             raise BackendError(f"openai {self.model}: {str(e)[:200]}") from e
         u = r.usage
         return ChatResult(text=r.choices[0].message.content or "", input_tokens=getattr(u, "prompt_tokens", 0) or 0,
@@ -203,9 +216,17 @@ class AnthropicBackend:
         if self.effort:
             kw["output_config"] = {"effort": self.effort}
         try:
-            r = self._get().messages.create(**kw)
+            client = self._get()
+        except Exception as e:  # noqa: BLE001
+            raise BackendConfigError(f"anthropic {self.model}: {str(e)[:300]}") from e
+        try:
+            r = client.messages.create(**kw)
+        except (anthropic.AuthenticationError, anthropic.PermissionDeniedError, anthropic.NotFoundError) as e:
+            raise BackendConfigError(f"anthropic {self.model}: {str(e)[:300]}") from e
         except anthropic.APIError as e:
             raise BackendError(f"anthropic {self.model}: {str(e)[:200]}") from e
+        except TypeError as e:   # raised by the SDK when no API key / auth method can be resolved
+            raise BackendConfigError(f"anthropic {self.model}: {str(e)[:300]} (set ANTHROPIC_API_KEY)") from e
         text = "" if r.stop_reason == "refusal" else "".join(b.text for b in r.content if b.type == "text")
         return ChatResult(text=text, input_tokens=r.usage.input_tokens or 0, output_tokens=r.usage.output_tokens or 0,
                           raw={"stop_reason": r.stop_reason})

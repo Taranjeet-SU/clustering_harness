@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import json
+import warnings
 import random
 
 import numpy as np
@@ -35,8 +36,10 @@ def local_split(ctx: RunContext, cid: str, ms: list, seed: int = 0, cap: int | N
     if n < C.split_min_size:
         return []
     X = ctx.V(ms)
-    U = umap.UMAP(n_components=C.split_umap_components, metric="cosine", n_neighbors=min(C.split_neighbors, n - 1),
-                  min_dist=0.0, random_state=seed).fit_transform(X)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*overridden to 1 by setting random_state.*")   # expected with a fixed seed
+        U = umap.UMAP(n_components=C.split_umap_components, metric="cosine", n_neighbors=min(C.split_neighbors, n - 1),
+                      min_dist=0.0, random_state=seed).fit_transform(X)
     lab = hdbscan.HDBSCAN(min_cluster_size=max(C.split_min_child, n // C.split_mcs_divisor), cluster_selection_method="leaf").fit_predict(U)
     groups = [[ms[i] for i in np.where(lab == c)[0]] for c in set(lab) if c >= 0]
     groups = sorted([g for g in groups if len(g) >= C.split_min_child], key=len, reverse=True)

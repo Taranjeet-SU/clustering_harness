@@ -131,3 +131,46 @@ def test_cached_responses_replay_with_fresh_stage_outputs(run, tmp_path):
     res2 = Pipeline(config(), llms=llms, label_embedder=HashEmbedder(), vectors=X, workdir=wd2).run(ds)
     assert not off["a"].misses and not off["b"].misses
     assert res2.assignments.cluster_id.tolist() == res.assignments.cluster_id.tolist()
+
+
+def test_workdir_refuses_other_records_of_the_same_size(run):
+    ds, X, wd, *_ = run
+    llms, _ = fake_llms()
+    texts = list(ds.texts)
+    texts[0] = texts[0] + " (edited)"
+    other = type(ds)(ids=ds.ids, texts=texts, titles=ds.titles, labels=ds.labels, meta=ds.meta, name=ds.name)
+    with pytest.raises(ValueError, match="data_fingerprint"):
+        Pipeline(config(), llms=llms, label_embedder=HashEmbedder(), vectors=X, workdir=wd).run(other)
+
+
+def test_workdir_refuses_other_models(run):
+    ds, X, wd, *_ = run
+    from clustering_harness.llm import LLM, CallableBackend
+    llms, _ = fake_llms()
+    llms["a"] = LLM(CallableBackend(lambda r: "{}", "another:model"), name="a")
+    with pytest.raises(ValueError, match="models"):
+        Pipeline(config(), llms=llms, label_embedder=HashEmbedder(), vectors=X, workdir=wd).run(ds)
+
+
+def test_unknown_until_stage_is_rejected_before_any_work(run, tmp_path):
+    ds, X, *_ = run
+    llms, _ = fake_llms()
+    with pytest.raises(ValueError, match="unknown stage 'bnak'"):
+        Pipeline(config(), llms=llms, label_embedder=HashEmbedder(), vectors=X, workdir=tmp_path / "w").run(ds, until="bnak")
+    assert not (tmp_path / "w" / "manifest.json").exists()      # nothing ran
+
+
+def test_unusable_model_stops_the_run_and_caches_nothing(run, tmp_path):
+    ds, X, *_ = run
+    from clustering_harness.llm import LLM, BackendConfigError, CallableBackend, ModelUnavailableError
+
+    def bad(req):
+        raise BackendConfigError("401 Unauthorized: invalid api key")
+
+    llms, _ = fake_llms()
+    llms["a"] = LLM(CallableBackend(bad, "fake:a"), name="a")
+    wd = tmp_path / "bad"
+    with pytest.raises(ModelUnavailableError, match="invalid api key"):
+        Pipeline(config(), llms=llms, label_embedder=HashEmbedder(), vectors=X, workdir=wd).run(ds)
+    from clustering_harness.llm import ResponseCache
+    assert ResponseCache(wd / "cache" / "llm.sqlite").error_count() == 0

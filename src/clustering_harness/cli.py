@@ -13,7 +13,8 @@ A run spec is YAML with sections ``data``, ``pipeline``, ``models`` (slots ``a``
 * ``ledger``: spend ledger (SQLite). Default ``<workdir>/spend.sqlite``, so ``budget_usd`` caps the spend of
   this run. Point several runs at one shared ledger to cap their *combined* spend instead.
 * ``embedding_cache``: directory of cached embedding matrices, keyed by embedder name (model, pooling,
-  length, precision) and the exact texts. Default ``~/.cache/clustering_harness/embeddings``.
+  length, precision) and the exact texts. Default ``$CLUSTERING_HARNESS_CACHE/embeddings``, else
+  ``~/.cache/clustering_harness/embeddings``.
 
 See ``examples/``.
 """
@@ -28,6 +29,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import yaml
+
+from .pipeline import STAGES
 
 __all__ = ["main", "load_spec", "build_from_spec"]
 
@@ -93,7 +96,7 @@ def build_config(p: dict, n: int):
     return PipelineConfig.model_validate(_deep_merge(cfg.model_dump(), p))
 
 
-def build_from_spec(spec: dict, ds=None, workdir: str | Path | None = None, config=None):
+def build_from_spec(spec: dict, ds=None, workdir: str | Path | None = None, config=None, ledger_path: str | Path | None = None):
     from .factory import build_embedder, build_llm
     from .llm import Ledger, ResponseCache
     from .pipeline import Pipeline
@@ -101,13 +104,15 @@ def build_from_spec(spec: dict, ds=None, workdir: str | Path | None = None, conf
     wd = Path(workdir or spec["workdir"]).expanduser()
     cfg = config or build_config(spec.get("pipeline"), len(ds))
     cache = ResponseCache(wd / "cache" / "llm.sqlite")
-    ledger = Ledger(Path(spec.get("ledger", wd / "spend.sqlite")).expanduser())
+    ledger = Ledger(Path(ledger_path or spec.get("ledger") or wd / "spend.sqlite").expanduser())
     llms = {}
     for k, v in spec["models"].items():
         v = dict(v)
         name = v.pop("name", k)
         llms[k] = build_llm(v, cache=cache, ledger=ledger, name=name)
-    emb_cache = Path(spec.get("embedding_cache", "~/.cache/clustering_harness/embeddings")).expanduser()
+    import os
+    default_cache = Path(os.environ.get("CLUSTERING_HARNESS_CACHE", "~/.cache/clustering_harness")) / "embeddings"
+    emb_cache = Path(spec.get("embedding_cache", default_cache)).expanduser()
     pipe = Pipeline(cfg, llms=llms, embedder=build_embedder(spec.get("embedder"), emb_cache),
                     label_embedder=build_embedder(spec.get("label_embedder"), emb_cache), workdir=wd)
     return pipe, ds, ledger
@@ -125,7 +130,6 @@ def _parse_baseline(s: str):
     return name, kw
 
 
-STAGES = "embed, bank, cascade, residual, refile, scoring, rollup, export"
 
 
 def main(argv=None) -> int:
@@ -138,7 +142,8 @@ def main(argv=None) -> int:
     s.add_argument("--preset", default="small", help="small (~1k records) | reference (~15k) | auto (default: small)")
     s = sub.add_parser("run", help="run the pipeline (resumable)", description="Run the pipeline. Re-running the same "
                        "spec resumes from the work directory's caches.")
-    s.add_argument("spec", help="run spec YAML"); s.add_argument("--until", default=None, help=f"stop after this stage ({STAGES})")
+    s.add_argument("spec", help="run spec YAML")
+    s.add_argument("--until", default=None, choices=STAGES, metavar="STAGE", help=f"stop after this stage: {', '.join(STAGES)}")
     s = sub.add_parser("compare", help="run the pipeline, then compare it with baselines and gold labels",
                        description="Run (or resume) the pipeline, run the requested baselines on the same embeddings, and "
                        "write external/internal metrics (and optionally the LLM-judge evaluation) to output/comparison.csv.")
@@ -165,9 +170,16 @@ def main(argv=None) -> int:
     s.add_argument("--split", default=None, help="dataset split (default: the dataset's default)")
     s.add_argument("--out", default=None, help="output CSV (default: NAME_SPLIT.csv)")
     a = ap.parse_args(argv)
-    logging.basicConfig(level=logging.INFO if a.verbose else logging.WARNING, format="%(asctime)s %(message)s")
-    for noisy in ("httpx", "httpcore", "urllib3", "faiss", "faiss.loader", "datasets", "huggingface_hub", "filelock"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
+    # -v shows this package's progress; other libraries only speak up for warnings and errors
+    logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(message)s")
+    logging.getLogger("clustering_harness").setLevel(logging.INFO if a.verbose else logging.WARNING)
+    for noisy in ("faiss", "faiss.loader"):
+        logging.getLogger(noisy).setLevel(logging.ERROR)
+    if a.cmd in ("run", "compare", "multirun"):
+        # plugins referenced as "module:attr" in the spec may live next to the spec or in the current folder
+        for d in (Path.cwd(), Path(a.spec).resolve().parent):
+            if str(d) not in sys.path:
+                sys.path.insert(0, str(d))
 
     if a.cmd == "init":
         sys.stdout.write(STARTER.format(preset=a.preset))
@@ -202,8 +214,10 @@ def main(argv=None) -> int:
         from .multirun import run_seeds
         ds = load_data(spec["data"])
         cfg = build_config(spec.get("pipeline"), len(ds))
-        out = run_seeds(lambda c, w: build_from_spec(spec, ds=ds, workdir=w, config=c)[0], ds, cfg, a.seeds,
-                        Path(spec["workdir"]).expanduser() / "multirun", base_workdir=Path(spec["workdir"]).expanduser())
+        main_wd = Path(spec["workdir"]).expanduser()
+        shared = spec.get("ledger") or main_wd / "spend.sqlite"      # one ledger: budgets cap all seeds together
+        out = run_seeds(lambda c, w: build_from_spec(spec, ds=ds, workdir=w, config=c, ledger_path=shared)[0], ds, cfg, a.seeds,
+                        main_wd / "multirun", base_workdir=main_wd)
         print(json.dumps(out["summary"]["agreement"], indent=1, default=float))
         return 0
     if a.cmd == "compare":

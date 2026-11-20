@@ -28,6 +28,7 @@ import pandas as pd
 from pydantic import BaseModel, Field
 
 from ..context import RunContext
+from ..llm.base import ModelUnavailableError
 from .partitions import knn_graph
 
 __all__ = ["ClusterScorer", "Name", "Judgment", "cluster_geometry"]
@@ -203,6 +204,8 @@ class ClusterScorer:
                         raise ValueError(f"ids not among own_cases: {unknown[:10]}; ids listed as both supporting and suspicious: {both[:10]}")
                 self._write(result, path)
                 return result
+            except ModelUnavailableError:
+                raise
             except Exception as e:  # noqa: BLE001
                 self._write({"error": str(e)[:800], "response": out}, path.with_suffix(f".attempt{attempt}.error.json"))
                 msgs = msgs[:2] + [{"role": "user", "content": "Previous response failed schema/ID validation. Return a complete valid object. "
@@ -316,6 +319,10 @@ class ClusterScorer:
                 c = jobs[f]
                 try:
                     rows.append(f.result())
+                except ModelUnavailableError:
+                    for other in jobs:
+                        other.cancel()
+                    raise
                 except Exception as e:  # noqa: BLE001
                     failures.append({"cluster_id": c, "error": str(e)})
                 self.ctx.progress("scoring", clusters_total=len(self.cids), clusters_completed=len(rows), clusters_failed=len(failures))

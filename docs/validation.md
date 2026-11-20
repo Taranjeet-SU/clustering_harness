@@ -105,8 +105,25 @@ caveat below.
 **LLM-judge caveat.** With `gpt-4o-mini` as both judges, the two-judge coherence evaluation is near ceiling for
 every partition (gold labels 4.98, pipeline 4.98, k-means 4.93, Leiden 4.82 on 40 sampled clusters each), and
 the gate's frozen calibration had a mean of 4.93 (sd 0.29): a lenient judge cannot separate good from mediocre
-clusters on short, clean queries. Use a stricter judge pair (see the local-model results) when the LLM
-evaluation is meant to discriminate.
+clusters on short, clean queries. Use a stricter judge pair (below) when the LLM evaluation is meant to
+discriminate.
+
+**Two different local models.** The same benchmark with a 27B Qwen model in slot a and `gpt-oss:20b`
+(reasoning) in slot b, both served locally, everything else unchanged:
+
+| partition | clusters | coverage | ARI | NMI | purity | LLM judge (40 clusters) |
+|---|---|---|---|---|---|---|
+| **pipeline** | 139 | 0.975 | 0.614 | 0.855 | 0.860 | 4.93 |
+| k-means, k = 77 | 77 | 1.000 | 0.608 | 0.845 | 0.751 | 4.78 |
+| UMAP + HDBSCAN | 103 | 0.894 | 0.634 | 0.855 | 0.879 | 4.96 |
+| agglomerative, k = 77 | 77 | 1.000 | 0.507 | 0.835 | 0.575 | 4.68 |
+| Leiden, mutual-kNN | 49 | 0.991 | 0.482 | 0.825 | 0.529 | 4.74 |
+| gold labels | 77 | 1.000 | 1.000 | 1.000 | 1.000 | 4.92 |
+
+The clustering is as good as with `gpt-4o-mini` (ARI 0.614 vs 0.615, NMI 0.855 vs 0.857), so the result
+does not depend on one model judging twice. The two-model judge is somewhat stricter: its spread across
+partitions is 0.28 against 0.16 with `gpt-4o-mini`, and it ranks the full-coverage baselines in the order the
+gold metrics do. It is still near ceiling on these short, clean queries.
 
 Cost of the single run: 3,613 gpt-4o-mini requests, 2.4 M input and 0.22 M output tokens (≈ $0.50 at list
 price), 13 minutes wall-clock.

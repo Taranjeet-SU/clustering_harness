@@ -213,6 +213,8 @@ def test_run_parallel_preserves_job_order_across_models():
 
 # ------------------------------------------------------------------------------------------- backends
 class FakeResponse:
+    status_code = 200
+
     def __init__(self, j):
         self._j = j
 

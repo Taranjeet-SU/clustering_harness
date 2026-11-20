@@ -85,6 +85,17 @@ All backends are wrapped by `LLM`, which provides the uniform contract: JSON ext
 retry, `{"_error": ...}` on contract failure, a persistent SQLite response cache keyed by the full request,
 bounded concurrency, and optional spend caps.
 
+Failures: a backend raises `BackendError` for retryable problems (timeouts, 5xx, rate limits after the SDK's own
+retries) and `BackendConfigError` for problems retrying cannot fix (invalid key, no permission, unknown model,
+missing region). `LLM` logs every failure with key-like strings redacted. A configuration error, or
+`max_consecutive_failures` (default 8) failed requests in a row, raises `ModelUnavailableError` and stops the
+run. A request that failed in transport returns `{"_error": ..., "_transport_error": ...}` to the algorithm and
+is **never cached**, so a rerun asks again. Only real model answers, including answers that break the JSON
+contract, are cached.
+
+Bedrock does not send `temperature` to Claude models, which reject non-default sampling. Other model families
+get it. Override with `send_temperature: true/false`.
+
 ## Cost controls
 
 ```python
