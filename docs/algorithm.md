@@ -146,8 +146,9 @@ All cascade-B residual records are shuffled (`random.Random(residual.seed)`) and
 of `batch_size` (15): the classifier (slot a) sees the `near_lines` (30) accepted lines nearest the batch
 centroid, the `near_provisional` (30) provisional labels of this stream nearest the batch titles (label
 embedder), and title + `desc_chars` (220) description characters per record, and answers per record: an
-accepted id `L<n>`, a provisional id `N<n>`, `NEW: <label>` (labels matching `generic_label` are dropped) or
-`JUNK: <reason>`. New labels join the stream's provisional list immediately.
+accepted id `L<n>`, a provisional id `N<n>`, `NEW: <label>` (labels containing one of the whole words of
+`generic_label` — general, misc, other, various, … — are dropped) or `JUNK: <reason>`. A record answered twice in
+one batch keeps its first answer. New labels join the stream's provisional list immediately.
 
 1. Provisional labels are pre-grouped (label-embedding cosine, average linkage, distance `canon_distance`
    0.2) and canonicalised by slot b in chunks of `canon_chunk` (30).
@@ -175,7 +176,7 @@ re-classifies records of failed batches in batches of `repair_batch_size` (5), i
   centroid margin (own − best other centroid cosine) and the share of negative margins, exact-duplicate counts.
 * **Naming** (slot `scoring.name_with`, default b): 12 member excerpts (2 central, 2 boundary, 2 diverse,
   seeded random; unique texts) and 2 excerpts from each of the two nearest clusters → name, inclusion and
-  exclusion criteria, rationale (schema-validated, 3 attempts).
+  exclusion criteria, rationale (schema-validated, 3 attempts in total; each failed attempt is fed back as a correction).
 * **Review**: both models score a 12-case panel (naming cases excluded where possible) for coherence, label
   fit and distinction (1–5) and a decision. A second panel (follow-up model only) is drawn if the cluster has
   ≥ `escalate_size` (100) members, any score < 4, a non-ACCEPT decision, a suspicious member or a judge
@@ -190,7 +191,7 @@ re-classifies records of failed batches in batches of `repair_batch_size` (5), i
 ## 19. Guarded report-line rollup — `algorithms/rollup.py`, `config.rollup`
 
 Each cluster is judged with the unified protocol (see `docs/evaluation.md`: 3 seeded samples of 8 × 2
-judges; judge-balanced score). Round 0 proposes merging clusters whose normalised names are identical. While
+judges; judge-balanced score). Round 0 (always run) proposes merging clusters whose normalised names are identical. While
 there are more than `target_max` (150) lines, rounds 1…5 group lines by average linkage on
 1 − (0.5 · name cosine + 0.5 · centroid cosine) at `thresholds` (0.22 … 0.46; groups larger than `max_group`
 are split tighter) and the rollup model partitions each group into lines. **Guard**: a proposed line is kept

@@ -190,19 +190,32 @@ class ClusterScorer:
         llm = self.ctx.llm(slot)
         msgs = [{"role": "system", "content": P["judge_system"] + P["score_system_suffix"]},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False) + "\nJSON schema: " + json.dumps(Schema.model_json_schema())}]
+        id_only_failure = None
         for attempt in range(3):
             out = llm.call(stage, msgs, max_tokens=2400, seed=attempt)
             try:
                 result = Schema.model_validate(out).model_dump()
                 if ids is not None:
-                    assert set(result["supporting_ids"]) <= ids and set(result["suspicious_ids"]) <= ids
-                    assert not (set(result["supporting_ids"]) & set(result["suspicious_ids"]))
+                    unknown = sorted((set(result["supporting_ids"]) | set(result["suspicious_ids"])) - ids)
+                    both = sorted(set(result["supporting_ids"]) & set(result["suspicious_ids"]))
+                    if unknown or both:
+                        id_only_failure = result
+                        raise ValueError(f"ids not among own_cases: {unknown[:10]}; ids listed as both supporting and suspicious: {both[:10]}")
                 self._write(result, path)
                 return result
             except Exception as e:  # noqa: BLE001
                 self._write({"error": str(e)[:800], "response": out}, path.with_suffix(f".attempt{attempt}.error.json"))
                 msgs = msgs[:2] + [{"role": "user", "content": "Previous response failed schema/ID validation. Return a complete valid object. "
                                                               "IDs must be supplied own-case IDs. Error: " + str(e)[:400]}]
+        if id_only_failure is not None:
+            # schema-valid answer whose id lists never validated: keep it with the invalid ids removed, flagged
+            r = dict(id_only_failure)
+            both = set(r["supporting_ids"]) & set(r["suspicious_ids"])
+            r["supporting_ids"] = [t for t in r["supporting_ids"] if t in ids and t not in both]
+            r["suspicious_ids"] = [t for t in r["suspicious_ids"] if t in ids]
+            r["limitation"] = (r.get("limitation") or "") + " [ids sanitised after 3 invalid attempts]"
+            self._write(r, path)
+            return r
         raise RuntimeError(f"{stage} {slot}: invalid responses for {path.name}")
 
     # ------------------------------------------------------------------ naming & review

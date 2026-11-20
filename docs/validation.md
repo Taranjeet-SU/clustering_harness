@@ -33,9 +33,72 @@ geometry) was recomputed by the package.
 Headline numbers therefore match exactly: 34 clusters, 919 of 1,231 records assigned (74.7%), mean
 two-model semantic score 3.909, size-weighted 3.890.
 
-## 2. Live rerun
+## 2. Live rerun (same data, everything recomputed)
 
-See the results section appended below (live models, embeddings recomputed by the package).
+**Question.** With nothing reused (embeddings recomputed by the package, every model call made live), is the
+result as relevant as the reference run?
+
+**Method.** Same 1,231 records, same two local models, `reference` preset, SearchUnify prompt preset. The only
+differences from the reference are numerical: embeddings computed on a different device (cosine to the
+reference vectors ≥ 0.9999, 99.8% identical nearest neighbours) and non-cached model answers. UMAP/HDBSCAN is
+sensitive to such tiny changes, so the base partition differs and the run is a relevance test, not an identity test.
+
+| metric | reference | package, live |
+|---|---|---|
+| clusters | 34 | 33 |
+| records assigned (of 1,231) | 919 | 888 |
+| coverage of eligible records | 0.775 | 0.749 |
+| junk | 45 | 45 |
+| mean two-model semantic score | 3.909 | 4.109 |
+| size-weighted semantic score | 3.890 | 4.022 |
+| share of clusters scoring ≥ 4 | 0.588 | 0.758 |
+| label fit (mean) | 3.865 | 4.078 |
+| distinction (mean) | 4.034 | 4.184 |
+| silhouette (size-weighted) | 0.021 | 0.025 |
+
+Agreement between the two partitions: status agreement (cluster / unassigned / junk) 0.81; on the 785 records
+assigned in both, ARI 0.49 and NMI 0.71 (all records, noise as singletons: ARI 0.44, AMI 0.58).
+
+Relevance is equal or better on every quality measure, at 2.6 points lower coverage. The partitions agree
+on structure (NMI 0.71) but not cluster by cluster, as expected when the base partition comes from a
+different (equally valid) UMAP/HDBSCAN solution. One cluster's review needed the ID-sanitising fallback
+(a model kept returning ticket ids outside the cluster); this is recorded in its `limitation` field.
+Wall-clock: about 2.5 h on CPU-offloaded local models.
+
+## 3b. Public benchmark: BANKING77
+
+[BANKING77](https://huggingface.co/datasets/PolyAI/banking77) test split (CC-BY-4.0): 3,080 customer-support
+queries, 77 gold intents, no titles. Pipeline: `small` preset, default (domain-neutral) prompts with the domain
+set to a digital bank, gte-large-en-v1.5 embeddings, bge-large-en-v1.5 label embeddings, `gpt-4o-mini` in both
+model slots. The pipeline is **not** told the number of intents; baselines that need *k* get the true k = 77.
+External metrics use the conservative `singleton` noise policy (every unassigned record is its own cluster).
+
+| partition | clusters | coverage | ARI | AMI | NMI | purity | BCubed F1 | silhouette |
+|---|---|---|---|---|---|---|---|---|
+| **pipeline** (clusters = report lines here) | 135 | 0.981 | **0.615** | 0.797 | **0.857** | 0.844 | 0.645 | 0.238 |
+| k-means, k = 77 (oracle k) | 77 | 1.000 | 0.608 | 0.802 | 0.845 | 0.751 | 0.655 | 0.227 |
+| agglomerative (cosine, average), k = 77 | 77 | 1.000 | 0.507 | 0.801 | 0.835 | 0.575 | 0.616 | 0.197 |
+| UMAP + HDBSCAN (mcs 10) | 103 | 0.894 | 0.634 | 0.783 | 0.855 | 0.879 | 0.662 | 0.260 |
+| HDBSCAN (mcs 10) | 31 | 0.296 | 0.217 | 0.334 | 0.732 | 0.904 | 0.285 | 0.392 |
+| Leiden, mutual-kNN (res 1.0) | 49 | 0.991 | 0.482 | 0.793 | 0.825 | 0.529 | 0.589 | 0.179 |
+
+Without knowing *k*, the pipeline matches the best baselines on ARI/NMI, assigns 98% of the queries, and has
+higher purity than every full-coverage baseline. It splits more finely than the gold intents (135 vs 77
+clusters), the expected direction for a method built to find report lines that a support lead would not merge.
+
+**Stability (3 seeds, `clustering-harness multirun`):** NMI 0.856 ± 0.001, ARI 0.602 ± 0.009, purity
+0.857 ± 0.012, coverage 0.975 ± 0.003, 138 ± 5 clusters; pairwise agreement between runs ARI 0.760 ± 0.013,
+AMI 0.876 ± 0.003. `gpt-4o-mini` is not fully deterministic at temperature 0, so part of the variation comes
+from the model rather than the seeds.
+
+**LLM-judge caveat.** With `gpt-4o-mini` as both judges, the two-judge coherence evaluation is near ceiling for
+every partition (gold labels 4.98, pipeline 4.98, k-means 4.93, Leiden 4.82 on 40 sampled clusters each), and
+the gate's frozen calibration had a mean of 4.93 (sd 0.29): a lenient judge cannot separate good from mediocre
+clusters on short, clean queries. Use a stricter judge pair (see the local-model results) when the LLM
+evaluation is meant to discriminate.
+
+Cost of the single run: 3,613 gpt-4o-mini requests, 2.4 M input and 0.22 M output tokens (≈ $0.50 at list
+price), 13 minutes wall-clock.
 
 ## 3. Stage conformance tests
 
