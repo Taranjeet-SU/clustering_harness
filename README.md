@@ -22,9 +22,21 @@ result with standard metrics, multi-run stability and LLM-as-judge evaluation.
 
 ## Install
 
+The package is not on PyPI yet; install it from GitHub (Python ≥ 3.10).
+
 ```bash
-pip install "clustering-harness[all]"        # or: pip install -e ".[all]" from a clone
+git clone https://github.com/Taranjeet-SU/clustering_harness.git
+cd clustering_harness
+python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
+pip install -e ".[all]"                               # everything: local embeddings, OpenAI, Anthropic, datasets
+clustering-harness --help                             # check the install
 ```
+
+Lighter installs: `pip install -e .` (core only, bring your own vectors or an Ollama/OpenAI embedder),
+or pick extras, e.g. `pip install -e ".[openai,datasets]"`. For development: `pip install -e ".[dev]"`
+and `pytest -m "not network"`.
+
+Without cloning: `pip install "clustering-harness[all] @ git+https://github.com/Taranjeet-SU/clustering_harness.git"`.
 
 Core dependencies: numpy, pandas, scikit-learn, umap-learn, hdbscan, faiss-cpu, igraph, leidenalg, pydantic.
 Extras: `embeddings` (torch, transformers, sentence-transformers), `openai`, `anthropic`, `datasets`.
