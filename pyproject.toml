@@ -32,13 +32,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-embeddings = ["torch>=2.1", "transformers>=4.40", "sentence-transformers>=2.7"]
+# upper bounds: the next major versions are untested (tested: transformers 4.57, 5.6 and 5.23)
+embeddings = ["torch>=2.1", "transformers>=4.40,<6", "sentence-transformers>=2.7,<7"]
 openai = ["openai>=1.30"]
 anthropic = ["anthropic>=0.40"]
-datasets = ["datasets>=2.18"]
+datasets = ["datasets>=2.18,<6"]
 excel = ["openpyxl>=3.1"]
-all = ["clustering-harness[embeddings,openai,anthropic,datasets,excel]"]
-dev = ["pytest>=7.4", "clustering-harness[all]"]
+mongo = ["pymongo>=4.6"]
+bedrock = ["botocore>=1.34.116"]
+all = ["clustering-harness[embeddings,openai,anthropic,bedrock,mongo,datasets,excel]"]
+dev = ["pytest>=7.4", "httpx", "clustering-harness[all]"]
 
 [project.scripts]
 clustering-harness = "clustering_harness.cli:main"

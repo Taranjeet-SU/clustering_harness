@@ -58,6 +58,28 @@ class ClusteringResult:
         return {c: g.ticket_id.astype(str).tolist() for c, g in a.groupby(col)}
 
 
+
+def _environment() -> dict:
+    """Versions that can change embeddings or clusterings numerically."""
+    import platform
+    from importlib import metadata
+    env = {"python": platform.python_version(), "platform": platform.platform()}
+    for pkg in ("clustering-harness", "numpy", "scikit-learn", "umap-learn", "hdbscan", "faiss-cpu", "leidenalg",
+                "torch", "transformers", "sentence-transformers"):
+        try:
+            env[pkg] = metadata.version(pkg)
+        except metadata.PackageNotFoundError:
+            pass
+    return env
+
+
+def _embedder_settings(e) -> dict | None:
+    e = getattr(e, "inner", e)
+    if e is None:
+        return None
+    keys = ("model", "device", "half", "store_float16", "pooling", "max_length", "batch_size")
+    return {"class": type(e).__name__, **{k: getattr(e, k) for k in keys if hasattr(e, k)}}
+
 class Pipeline:
     """The full clustering pipeline. Models and embedders are injected, so any provider can be used."""
 
@@ -119,17 +141,23 @@ class Pipeline:
     # ------------------------------------------------------------------ run
     def run(self, ds: Dataset, until: str | None = None) -> ClusteringResult | None:
         T0 = time.time()
+        if len(ds) == 0:
+            raise ValueError(f"dataset {ds.name!r} has no records (check the file, query or collection names)")
         wd = self.workdir
         wd.mkdir(parents=True, exist_ok=True)
         manifest = {"dataset": ds.name, "records": len(ds), "config_fingerprint": self.cfg.fingerprint(),
                     "models": {k: m.model_id for k, m in self.llms.items()},
                     "embedder": getattr(self.embedder, "name", "precomputed" if self.vectors is not None else None),
-                    "label_embedder": getattr(self.label_embedder, "name", None)}
+                    "label_embedder": getattr(self.label_embedder, "name", None),
+                    "embedder_settings": _embedder_settings(self.embedder),
+                    "environment": _environment()}
         old = wd / "manifest.json"
         if old.exists():
             prev = json.loads(old.read_text())
+            manifest["first_run_environment"] = prev.get("first_run_environment") or prev.get("environment")
             if prev.get("config_fingerprint") != manifest["config_fingerprint"] or prev.get("records") != len(ds):
                 raise ValueError(f"{wd} holds a run with a different config or dataset; use a new workdir")
+        manifest["first_run_environment"] = manifest.get("first_run_environment") or manifest["environment"]
         write_json(manifest, old)
         self.cfg.to_file(wd / "config.yaml")
         X = self._embed(ds)

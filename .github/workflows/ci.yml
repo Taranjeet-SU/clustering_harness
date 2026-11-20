@@ -17,3 +17,28 @@ jobs:
           pip install -e . pytest
       - name: Unit and integration tests (offline, fake models)
         run: pytest -q -m "not network"
+
+  extras:
+    # full install as a user gets it (CPU-only torch), including the real embedder against current transformers
+    # and the MongoDB loader against a real server
+    runs-on: ubuntu-latest
+    services:
+      mongo:
+        image: mongo:7
+        ports: ["27017:27017"]
+    env:
+      MONGODB_TEST_URI: mongodb://localhost:27017
+      CH_NETWORK_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install with all extras (CPU torch)
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev]"
+          pip list | grep -iE "^(torch|transformers|sentence-transformers|datasets|anthropic|openai) "
+      - name: All tests, including real embedder and dataset downloads
+        run: pytest -q

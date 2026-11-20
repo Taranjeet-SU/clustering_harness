@@ -197,6 +197,16 @@ class Dataset:
         return cls(ids=ids, texts=texts, titles=titles, labels=labels, meta=meta if meta.shape[1] else None, name=name)
 
     @classmethod
+    def from_mongo(cls, collection: str | list[str], **kw) -> "Dataset":
+        """Load from MongoDB: one or several collections, with an optional filter ``query`` (or per-collection
+        ``queries``) or an aggregation ``pipeline``. Connection from ``uri`` or the ``uri_env`` environment variable
+        (default ``MONGODB_URI``). Field arguments: ``id_field`` (default ``_id``), ``text_field`` (one field or a
+        list joined into one text), ``title_field``, ``label_field``, ``meta_fields``; dotted paths reach into
+        nested documents. See :mod:`clustering_harness.mongo` for every option."""
+        from .mongo import _from_mongo
+        return _from_mongo(cls, collection, **kw)
+
+    @classmethod
     def from_records(cls, records: Iterable[dict], id_key: str = "id", text_key: str = "text", title_key: str | None = None,
                      label_key: str | None = None, name: str = "dataset", clean: Callable[[str], str] | None = None) -> "Dataset":
         return cls.from_frame(pd.DataFrame(list(records)), id_key, text_key, title_key, label_key, name, clean)
@@ -230,9 +240,13 @@ class Dataset:
             return cls.from_csv(path, **kw)
         if suffix in (".json", ".jsonl"):
             return cls.from_json(path, **kw)
+        kw.setdefault("name", Path(path).stem)
         if suffix == ".parquet":
             return cls.from_frame(pd.read_parquet(path), **kw)
-        raise ValueError(f"unsupported file type {suffix}")
+        if suffix in (".xlsx", ".xlsm", ".xls"):
+            sheet = kw.pop("sheet_name", 0)
+            return cls.from_frame(pd.read_excel(path, sheet_name=sheet, dtype=str, keep_default_na=False), **kw)
+        raise ValueError(f"unsupported file type {suffix!r}; use .csv .tsv .json .jsonl .parquet .xlsx, or Dataset.from_frame")
 
 
 def parse_title_description(text: str, pattern: str = r"^\s*Title\s*:(.*?)\|kcs\|\s*Description\s*:(.*)$") -> tuple[str, str]:

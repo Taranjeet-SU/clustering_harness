@@ -25,10 +25,12 @@ __all__ = ["run_seeds", "compare_partitions", "judge_partitions", "eval_context"
 
 
 def run_seeds(make_pipeline: Callable[[PipelineConfig, Path], "object"], ds: Dataset, config: PipelineConfig, seeds=(0, 1, 2),
-              workdir: str | Path = "runs/multirun") -> dict:
+              workdir: str | Path = "runs/multirun", base_workdir: str | Path | None = None) -> dict:
     """Run the pipeline once per seed. ``make_pipeline(cfg, workdir)`` must return a configured :class:`Pipeline`.
 
-    Seeds must be members of ``config.bank.seeds`` (the base partition is taken from the bank)."""
+    Seeds must be members of ``config.bank.seeds`` (the base partition is taken from the bank). If
+    ``base_workdir`` is given, a seed whose configuration equals ``config`` (same fingerprint) runs in
+    ``base_workdir``, so an existing main run is reused instead of being paid for again."""
     workdir = Path(workdir)
     results, parts = {}, {}
     for s in seeds:
@@ -36,7 +38,8 @@ def run_seeds(make_pipeline: Callable[[PipelineConfig, Path], "object"], ds: Dat
             raise ValueError(f"seed {s} is not in config.bank.seeds {config.bank.seeds}")
         cfg = copy.deepcopy(config)
         cfg.base.seed, cfg.cascade.seed, cfg.residual.seed = s, s, s
-        res = make_pipeline(cfg, workdir / f"seed_{s}").run(ds)
+        same = base_workdir is not None and cfg.fingerprint() == config.fingerprint()
+        res = make_pipeline(cfg, Path(base_workdir) if same else workdir / f"seed_{s}").run(ds)
         results[s] = res
         parts[f"seed_{s}"] = res.labels()
     agree = {m: pairwise_agreement(list(parts.values()), names=list(parts), metric=m) for m in ("ari", "ami")}

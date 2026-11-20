@@ -367,7 +367,7 @@ def test_anthropic_thinking_effort_and_refusal():
 
 def test_anthropic_api_error_becomes_backend_error():
     anthropic = pytest.importorskip("anthropic")
-    import httpx
+    httpx = pytest.importorskip("httpx")
     be = AnthropicBackend("claude-test", api_key="k")
 
     class Bad:

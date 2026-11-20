@@ -21,9 +21,11 @@ from typing import Any, Callable, Sequence
 
 from .backends import OfflineCallError
 from .base import Backend, BackendError, ChatRequest
+import logging
 from .budget import Budget, Ledger, Price, price_for
 from .cache import ResponseCache, request_key
 
+log = logging.getLogger("clustering_harness")
 __all__ = ["LLM", "run_parallel", "extract_json"]
 
 _JSON = re.compile(r"\{.*\}", re.S)
@@ -66,6 +68,10 @@ class LLM:
         self.price = price or price_for(getattr(backend, "model", ""))
         self.ledger = ledger
         self.budget = Budget(budget_usd, ledger, backend.model_id) if (budget_usd is not None and ledger is not None) else None
+        if budget_usd is not None and self.price.input_per_mtok == 0 and self.price.output_per_mtok == 0 \
+                and not backend.model_id.startswith(("ollama:", "offline", "callable")):
+            log.warning("%s: budget_usd=%s cannot be enforced because the price of %s is unknown; pass price=Price(in, out) "
+                        "(or price_in/price_out in a run spec)", self.name, budget_usd, backend.model_id)
         self.transport_retries = transport_retries
         self.stats = {"requests": 0, "cache_hits": 0, "failures": 0, "input_tokens": 0, "output_tokens": 0}
         self._stats_lock = threading.Lock()

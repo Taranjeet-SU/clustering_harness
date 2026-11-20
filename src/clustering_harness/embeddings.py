@@ -53,10 +53,34 @@ def _token_budget_batches(lengths: np.ndarray, batch_tokens: int):
         yield cur
 
 
+def _extended_attention_mask(self, attention_mask, input_shape=None, device=None, dtype=None):
+    """The ``PreTrainedModel.get_extended_attention_mask`` of transformers 4.x (encoder case), which remote
+    model code still calls but recent transformers releases no longer provide."""
+    import torch
+    dtype = dtype or self.dtype
+    if attention_mask.dim() == 3:
+        ext = attention_mask[:, None, :, :]
+    elif attention_mask.dim() == 2:
+        ext = attention_mask[:, None, None, :]
+    else:
+        raise ValueError(f"wrong shape for attention_mask: {tuple(attention_mask.shape)}")
+    ext = ext.to(dtype=dtype)
+    return (1.0 - ext) * torch.finfo(dtype).min
+
+
+def _ensure_extended_attention_mask(model) -> None:
+    import types
+    for m in model.modules():
+        if hasattr(m, "config") and hasattr(m, "dtype") and not hasattr(m, "get_extended_attention_mask"):
+            m.get_extended_attention_mask = types.MethodType(_extended_attention_mask, m)
+
+
 def _fix_gte_buffers(model) -> None:
     """``Alibaba-NLP/gte-*-en-v1.5`` remote code can leave position ids and rotary caches uninitialised under
-    recent ``transformers`` versions; recompute them exactly as the model's ``__init__`` does."""
+    recent ``transformers`` versions; recompute them exactly as the model's ``__init__`` does. Also restores
+    ``get_extended_attention_mask``, which the remote code calls and recent transformers removed."""
     import torch
+    _ensure_extended_attention_mask(model)
     emb = getattr(model, "embeddings", None)
     rot = getattr(emb, "rotary_emb", None) if emb is not None else None
     if rot is None or not hasattr(rot, "_set_cos_sin_cache"):
@@ -77,15 +101,22 @@ class HFTransformerEmbedder:
     Parameters mirror the reference implementation: inputs are truncated to ``max_length`` tokens, batched
     by length under a padded-token budget, pooled (``"cls"`` = first token, ``"mean"`` = attention-masked
     mean), L2-normalised in float32, and optionally stored as float16 (``store_float16``) before being
-    returned as float32 (re-normalised). ``half=True`` runs the model in float16 on CUDA.
+    returned as float32 (re-normalised).
+
+    ``device`` defaults to ``"cpu"``; pass ``"cuda"``, ``"cuda:1"`` or ``"auto"`` (CUDA when available) to use a
+    GPU. ``half=True`` runs the model in float16 on CUDA; the precision is part of :attr:`name` (``:fp16``) so
+    caches never mix float16-GPU and float32 vectors.
     """
 
     def __init__(self, model: str = "Alibaba-NLP/gte-large-en-v1.5", pooling: str = "cls", max_length: int = 8192,
-                 device: str | None = None, batch_tokens: int = 32768, half: bool = True, store_float16: bool = True,
+                 device: str | None = "cpu", batch_tokens: int = 32768, half: bool = True, store_float16: bool = True,
                  trust_remote_code: bool = True, local_files_only: bool = False, query_prefix: str = ""):
         self.model = model
         self.pooling = pooling
         self.max_length = max_length
+        if device in (None, "auto"):
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
         self.batch_tokens = batch_tokens
         self.half = half
@@ -93,14 +124,14 @@ class HFTransformerEmbedder:
         self.trust_remote_code = trust_remote_code
         self.local_files_only = local_files_only
         self.query_prefix = query_prefix
-        self.name = f"hf:{model}:{pooling}:{max_length}"
+        self.name = f"hf:{model}:{pooling}:{max_length}" + (":fp16" if half and device.startswith("cuda") else "")
         self.last_stats: dict = {}
 
     def encode(self, texts: Sequence[str]) -> np.ndarray:
         import torch
         from transformers import AutoModel, AutoTokenizer
         texts = [self.query_prefix + (t or "") for t in texts]
-        dev = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
+        dev = self.device
         tok = AutoTokenizer.from_pretrained(self.model, local_files_only=self.local_files_only, trust_remote_code=self.trust_remote_code)
         enc = tok(texts, truncation=True, max_length=self.max_length, add_special_tokens=True)["input_ids"]
         raw_len = np.array([len(x) for x in tok(texts, truncation=False, add_special_tokens=True)["input_ids"]])

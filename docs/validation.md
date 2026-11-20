@@ -65,7 +65,7 @@ different (equally valid) UMAP/HDBSCAN solution. One cluster's review needed the
 (a model kept returning ticket ids outside the cluster); this is recorded in its `limitation` field.
 Wall-clock: about 2.5 h on CPU-offloaded local models.
 
-## 3b. Public benchmark: BANKING77
+## 3. Public benchmark: BANKING77
 
 [BANKING77](https://huggingface.co/datasets/PolyAI/banking77) test split (CC-BY-4.0): 3,080 customer-support
 queries, 77 gold intents, no titles. Pipeline: `small` preset, default (domain-neutral) prompts with the domain
@@ -91,6 +91,17 @@ clusters), the expected direction for a method built to find report lines that a
 AMI 0.876 ± 0.003. `gpt-4o-mini` is not fully deterministic at temperature 0, so part of the variation comes
 from the model rather than the seeds.
 
+**Independent reproduction.** A separate agent with only the public repository reproduced this benchmark:
+pipeline ARI 0.622, NMI 0.860, purity 0.856, coverage 0.977, 133 clusters; every baseline row identical;
+LLM judge gold 4.98 / pipeline 4.99; three seeds NMI 0.855 ± 0.003, ARI 0.609 ± 0.013, pairwise ARI 0.755.
+Single run 12.4 minutes and $0.49. Two of its findings changed the published setup: the example config now
+matches this table (it previously put a different model in slot a), and the embedder now runs on CPU unless
+a GPU is requested.
+
+**One model in both slots.** Both slots ran `gpt-4o-mini`, so each two-judge decision was one model asked
+twice. The gate and scores are still applied, but they are not independent opinions; see the LLM-judge
+caveat below.
+
 **LLM-judge caveat.** With `gpt-4o-mini` as both judges, the two-judge coherence evaluation is near ceiling for
 every partition (gold labels 4.98, pipeline 4.98, k-means 4.93, Leiden 4.82 on 40 sampled clusters each), and
 the gate's frozen calibration had a mean of 4.93 (sd 0.29): a lenient judge cannot separate good from mediocre
@@ -100,7 +111,7 @@ evaluation is meant to discriminate.
 Cost of the single run: 3,613 gpt-4o-mini requests, 2.4 M input and 0.22 M output tokens (≈ $0.50 at list
 price), 13 minutes wall-clock.
 
-## 3. Stage conformance tests
+## 4. Stage conformance tests
 
 `tests/unit/test_*_conformance.py` test each stage against the written specification
 ([algorithm.md](algorithm.md)) with deterministic fake models: gate calibration and decision bands, bank

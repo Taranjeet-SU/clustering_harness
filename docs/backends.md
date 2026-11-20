@@ -40,8 +40,46 @@ custom = LLM(CallableBackend(lambda req: my_client.generate(req.messages, req.ma
 | `OllamaBackend` | `/api/chat`, JSON mode via `format: json`, pinned `num_ctx`, `think` passed through, seeds honoured |
 | `OpenAICompatibleBackend` | OpenAI Chat Completions; `response_format=json_object`; works with vLLM / LM Studio / TGI via `base_url` (set `token_param="max_tokens"` for servers that do not know `max_completion_tokens`) |
 | `AnthropicBackend` | official SDK; system messages → `system`; no temperature/seed (current Claude models reject non-default sampling), so reproducibility relies on the cache; thinking disabled + low effort by default |
+| `BedrockBackend` | Amazon Bedrock `Converse`; authentication by default AWS chain, profile, access keys (+ session token), assume-role with external id (auto-renewed), Bedrock API key (bearer token), or a `credentials_provider` callable; model ids, cross-region inference profile ids and ARNs; same-role turns merged; no JSON mode (the `LLM` wrapper extracts JSON) |
+| `OpenAICompatibleBackend(azure_endpoint=..., api_version=...)` | Azure OpenAI (`model` = deployment name); spec kind `azure_openai` |
+| spec kind `gemini` | Gemini through its OpenAI-compatible endpoint (key `GEMINI_API_KEY`, no seed) |
 | `CallableBackend` | any function `ChatRequest -> str` |
 | `OfflineBackend` | never calls a model: replay strictly from a cache (misses raise) |
+
+### Bedrock credentials
+
+```python
+from clustering_harness.llm import BedrockBackend
+BedrockBackend("us.anthropic.claude-haiku-5-5-v1:0", region="us-east-1")                         # default AWS chain
+BedrockBackend("anthropic.claude-haiku-5-5-v1:0", region="eu-west-1", profile_name="analytics")  # ~/.aws profile
+BedrockBackend(model, region="us-east-1", credentials={"aws_access_key_id": "...", "aws_secret_access_key": "...",
+                                                        "aws_session_token": "...", "expiration": "2026-12-01T10:00:00Z"})
+BedrockBackend(model, region="us-east-1", role_arn="arn:aws:iam::123456789012:role/invoke", external_id="abc")
+BedrockBackend(model, region="us-east-1", bearer_token="...")          # or AWS_BEARER_TOKEN_BEDROCK in the environment
+BedrockBackend(model, credentials_provider="my_pkg.secrets:bedrock")   # callable returning the credentials dict
+```
+
+Resolution order: provider, then `credentials`, then constructor arguments, then the bearer-token environment
+variable, then the AWS default chain. With `role_arn`, the resolved credentials call STS `AssumeRole`. Keys
+with an `expiration` (from the provider or from STS) are renewed `refresh_margin_seconds` (default 300) before
+they expire, and once after an expired-token error. Credential dicts may use snake_case or the STS spellings
+(`AccessKeyId`, `SecretAccessKey`, `SessionToken`, `Expiration`); `inference_profile_arn` / `model_id` in the
+dict overrides `model`. `auth_mode` tells you which path was used. Prices of Bedrock ids that contain a known
+model name (`...claude-haiku-5-5...`) are looked up automatically; pass `price=` for anything else.
+
+### Plugging in your own model loader
+
+A backend is any object with a non-empty `model_id` (part of every cache key) and a thread-safe
+`complete(request: ChatRequest) -> ChatResult`. In a run spec, `backend:` accepts:
+
+- a built-in kind: `ollama`, `openai`, `openai_compatible`, `azure_openai`, `gemini`, `anthropic`, `bedrock`, `offline`;
+- a kind added with `clustering_harness.factory.register_backend(kind, factory)`, where `factory(options)` pops the
+  options it uses;
+- a kind published by an installed package under the entry-point group `clustering_harness.backends`;
+- an import path `"package.module:ClassOrFactory"`, called with the remaining options as keyword arguments.
+
+`api_key_provider` (OpenAI, Azure, Gemini, Anthropic) and `credentials_provider` (Bedrock) accept a callable or
+an import path, so keys can come from a vault, a database or any other store at run time.
 
 All backends are wrapped by `LLM`, which provides the uniform contract: JSON extraction with one corrective
 retry, `{"_error": ...}` on contract failure, a persistent SQLite response cache keyed by the full request,
@@ -51,7 +89,8 @@ bounded concurrency, and optional spend caps.
 
 ```python
 from clustering_harness.llm import Ledger
-ledger = Ledger("~/.cache/clustering_harness/spend.sqlite")      # shared across runs
+ledger = Ledger("runs/my_run/spend.sqlite")       # per run (the CLI default is <workdir>/spend.sqlite)
+# ledger = Ledger("~/.cache/clustering_harness/spend.sqlite")   # shared: budgets then cap the combined spend of all runs
 LLM(OpenAICompatibleBackend("gpt-4o-mini"), budget_usd=20, ledger=ledger)
 ```
 

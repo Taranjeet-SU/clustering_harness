@@ -2,7 +2,8 @@
 and budgets are handled by :class:`~clustering_harness.llm.client.LLM`.
 
 * :class:`OllamaBackend` — local models through the Ollama ``/api/chat`` endpoint.
-* :class:`OpenAICompatibleBackend` — OpenAI and any OpenAI-compatible server (vLLM, LM Studio, TGI, ...).
+* :class:`OpenAICompatibleBackend` — OpenAI, Azure OpenAI, and any OpenAI-compatible server (vLLM, LM Studio,
+  TGI, Gemini's OpenAI-compatible endpoint, ...).
 * :class:`AnthropicBackend` — Claude models through the official ``anthropic`` SDK.
 * :class:`CallableBackend` — wrap any ``fn(ChatRequest) -> str`` (custom providers, tests).
 * :class:`OfflineBackend` — raises on every call; use with a pre-filled cache to guarantee replay.
@@ -73,32 +74,58 @@ class OllamaBackend:
 
 
 class OpenAICompatibleBackend:
-    """OpenAI Chat Completions (``openai`` SDK). Works with OpenAI and OpenAI-compatible servers.
+    """OpenAI Chat Completions (``openai`` SDK). Works with OpenAI, Azure OpenAI and OpenAI-compatible servers.
 
-    ``api_key`` defaults to the ``api_key_env`` environment variable. ``json_mode`` requests use
-    ``response_format={"type": "json_object"}`` unless ``supports_json_mode=False``.
+    The key is taken from ``api_key``, else from ``api_key_provider`` (a callable or ``"module:function"`` returning
+    the key, called once when the client is created), else from the ``api_key_env`` environment variable.
+    For Azure OpenAI pass ``azure_endpoint`` and ``api_version``; ``model`` is then the *deployment* name.
+    ``json_mode`` requests use ``response_format={"type": "json_object"}`` unless ``supports_json_mode=False``.
     """
 
     def __init__(self, model: str, base_url: str | None = None, api_key: str | None = None, api_key_env: str = "OPENAI_API_KEY",
                  timeout: float = 120, max_retries: int = 5, supports_json_mode: bool = True, supports_seed: bool = True,
-                 token_param: str = "max_completion_tokens"):
+                 token_param: str = "max_completion_tokens", api_key_provider=None, azure_endpoint: str | None = None,
+                 api_version: str | None = None, default_headers: dict | None = None):
         self.model = model
         self.base_url = base_url
-        self._api_key = api_key or os.environ.get(api_key_env)
+        self._api_key = api_key
+        self._api_key_env = api_key_env
+        self._api_key_provider = api_key_provider
+        self.azure_endpoint = azure_endpoint
+        self.api_version = api_version
+        self.default_headers = default_headers
         self.timeout = timeout
         self.max_retries = max_retries
         self.supports_json_mode = supports_json_mode
         self.supports_seed = supports_seed
         self.token_param = token_param
-        self.model_id = f"openai:{model}" if base_url is None else f"openai-compatible:{base_url}:{model}"
+        if azure_endpoint:
+            self.model_id = f"azure-openai:{azure_endpoint.rstrip('/')}:{model}"
+        else:
+            self.model_id = f"openai:{model}" if base_url is None else f"openai-compatible:{base_url}:{model}"
         self._client = None
         self._lock = threading.Lock()
+
+    def _key(self):
+        if self._api_key:
+            return self._api_key
+        if self._api_key_provider is not None:
+            from .bedrock import resolve_callable
+            return resolve_callable(self._api_key_provider)()
+        return os.environ.get(self._api_key_env)
 
     def _get(self):
         with self._lock:
             if self._client is None:
-                from openai import OpenAI
-                self._client = OpenAI(api_key=self._api_key, base_url=self.base_url, timeout=self.timeout, max_retries=self.max_retries)
+                kw = {"api_key": self._key(), "timeout": self.timeout, "max_retries": self.max_retries}
+                if self.default_headers:
+                    kw["default_headers"] = self.default_headers
+                if self.azure_endpoint:
+                    from openai import AzureOpenAI
+                    self._client = AzureOpenAI(azure_endpoint=self.azure_endpoint, api_version=self.api_version, **kw)
+                else:
+                    from openai import OpenAI
+                    self._client = OpenAI(base_url=self.base_url, **kw)
         return self._client
 
     def complete(self, request: ChatRequest) -> ChatResult:
@@ -128,9 +155,12 @@ class AnthropicBackend:
 
     def __init__(self, model: str = "claude-haiku-5-5", api_key: str | None = None, thinking: dict | None = None,
                  effort: str | None = "low", max_tokens_cap: int = 4000, min_max_tokens: int = 256, timeout: float = 120,
-                 max_retries: int = 8):
+                 max_retries: int = 8, api_key_provider=None, api_key_env: str = "ANTHROPIC_API_KEY", base_url: str | None = None):
         self.model = model
         self._api_key = api_key
+        self._api_key_provider = api_key_provider
+        self._api_key_env = api_key_env
+        self.base_url = base_url
         self.thinking = thinking if thinking is not None else {"type": "disabled"}
         self.effort = effort
         self.max_tokens_cap = max_tokens_cap
@@ -148,8 +178,15 @@ class AnthropicBackend:
                 kw = {"max_retries": self.max_retries, "timeout": self.timeout,
                       # some environments ship broken brotli/zstd decoders; plain gzip is always safe
                       "default_headers": {"Accept-Encoding": "gzip"}}
-                if self._api_key:
-                    kw["api_key"] = self._api_key
+                key = self._api_key
+                if not key and self._api_key_provider is not None:
+                    from .bedrock import resolve_callable
+                    key = resolve_callable(self._api_key_provider)()
+                key = key or os.environ.get(self._api_key_env)
+                if key:
+                    kw["api_key"] = key
+                if self.base_url:
+                    kw["base_url"] = self.base_url
                 self._client = anthropic.Anthropic(**kw)
         return self._client
 

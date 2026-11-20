@@ -1,0 +1,16 @@
+# Two different providers (Anthropic + OpenAI) as the two judges. NOT the configuration behind the published
+# BANKING77 numbers (see banking77.yaml) and not yet benchmarked; needs ANTHROPIC_API_KEY and OPENAI_API_KEY.
+#   clustering-harness run examples/banking77_two_providers.yaml
+workdir: runs/banking77_two_providers
+data: {dataset: banking77, split: test}
+pipeline:
+  preset: small
+  prompts: default
+  domain:
+    product: a digital bank
+    product_description: "a mobile banking app: cards, top-ups, transfers, payments, exchange rates, identity verification and account security"
+models:
+  a: {name: haiku, backend: anthropic, model: claude-haiku-5-5, effort: low, concurrency: 8, budget_usd: 5}
+  b: {name: gpt-4o-mini, backend: openai, model: gpt-4o-mini, concurrency: 8, budget_usd: 5}
+embedder: {backend: hf, model: Alibaba-NLP/gte-large-en-v1.5, device: cpu, half: false}
+label_embedder: {backend: st, model: BAAI/bge-large-en-v1.5, device: cpu}

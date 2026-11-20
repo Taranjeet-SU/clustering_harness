@@ -37,8 +37,17 @@ PRICES_PER_MTOK: dict[str, Price] = {
 
 
 def price_for(model: str) -> Price:
-    """Known price for a hosted model name, or zero (local / unknown models)."""
-    return PRICES_PER_MTOK.get(model, Price(0.0, 0.0))
+    """Known price for a hosted model name, or zero (local / unknown models).
+
+    Provider-specific ids that contain a known name match it, e.g. the Bedrock id
+    ``us.anthropic.claude-haiku-5-5-v1:0`` is priced as ``claude-haiku-5-5`` (the longest matching name wins).
+    Prices differ by provider and region; pass an explicit :class:`Price` when it matters."""
+    if model in PRICES_PER_MTOK:
+        return PRICES_PER_MTOK[model]
+    for name in sorted(PRICES_PER_MTOK, key=len, reverse=True):
+        if name in (model or ""):
+            return PRICES_PER_MTOK[name]
+    return Price(0.0, 0.0)
 
 
 class BudgetExceeded(RuntimeError):
