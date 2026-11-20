@@ -131,7 +131,7 @@ def _load_support_tickets(split: str, cache_dir: Path, language: str | None = "e
     rows = np.arange(len(df))
     keep = df[label_field].notna().to_numpy()
     if language:
-        keep &= (df["language"] == language).to_numpy()
+        keep = keep & (df["language"] == language).to_numpy()
     df, rows = df[keep], rows[keep]
     meta_cols = [c for c in ("queue", "type", "priority", "language") if c != label_field]
     # The CSV stores line breaks as literal "\\n" sequences; restore real newlines.
