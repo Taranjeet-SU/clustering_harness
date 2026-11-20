@@ -101,13 +101,98 @@ table = compare_partitions(parts, X=X, gold=ds.labels,
 
 ## Validation
 
-* **Reference parity.** On a private 1,231-ticket support dataset the package reproduces the reference
-  implementation exactly: replaying the reference run's LLM answers, every prompt the package sent was
-  byte-identical (zero cache misses over 1,692 LLM calls) and every stage output — 151 bank partitions, base
-  partition, cascades A and B, both residual passes, cluster geometry, names, scores and report lines — was
-  identical. Details in [docs/validation.md](docs/validation.md).
-* **Unit and conformance tests** check each stage against the written specification (`tests/`).
-* **Public benchmark** results on BANKING77 are in [docs/validation.md](docs/validation.md).
+Full method and tables: [docs/validation.md](docs/validation.md).
+
+### 1. Exact parity with the reference implementation
+
+The package was extracted from a set of research scripts that had been run on a private dataset of 1,231
+support tickets with two local models (a 27B Qwen model and `gpt-oss:20b`). Every LLM request of that run was
+traced and replayed through the package with an offline backend, so any prompt that was not byte-identical
+would have aborted the run.
+
+| stage | result |
+|---|---|
+| consensus bank (151 partitions, recomputed) | 151 / 151 identical |
+| base partition, cascades A and B, residual and refile passes | identical |
+| scoring (38 columns per cluster), rollup, final assignments | identical |
+| LLM requests | 1,692, zero cache misses |
+
+Headline: 34 clusters, 919 / 1,231 records assigned, mean two-model semantic score 3.909. The replay is
+rerun after every change to the algorithm modules.
+
+### 2. Live rerun on the same data (nothing reused)
+
+Embeddings recomputed by the package on a different device and every model call made live. The
+embeddings are numerically almost identical (cosine ≥ 0.9999, 99.8% identical nearest neighbours), but
+UMAP + HDBSCAN is sensitive to such differences, so this run tests relevance, not identity.
+
+| metric | reference | package, live |
+|---|---|---|
+| clusters | 34 | 33 |
+| records assigned | 919 (77.5% of eligible) | 888 (74.9%) |
+| mean semantic score | 3.909 | **4.109** |
+| size-weighted semantic score | 3.890 | **4.022** |
+| clusters scoring ≥ 4 | 59% | **76%** |
+| label fit / distinction | 3.87 / 4.03 | 4.08 / 4.18 |
+
+Relevance is equal or better on every quality measure, at 2.6 points lower coverage. The two partitions
+agree on 81% of record statuses (clustered / unassigned / junk) and have NMI 0.71 on records clustered in
+both: the same structure, though individual clusters differ.
+
+### 3. Stage conformance tests
+
+`tests/unit/test_*_conformance.py` check every stage against the specification in
+[docs/algorithm.md](docs/algorithm.md) with deterministic fake models: gate calibration and decision
+bands, bank grid and post-processing, split / core / Leiden / pruning / reassignment / merge rules,
+residual classifier parsing, scoring geometry against brute-force definitions, and the rollup guard. The
+metrics are tested against scikit-learn and textbook examples. 233 tests pass in CI.
+
+The review found and fixed these robustness issues in the reference logic:
+- model booleans such as `"false"`/`"no"` were read as *yes*;
+- `null` names were accepted;
+- malformed rollup answers crashed the run;
+- a record answered twice in one batch took the last answer instead of the first;
+- `NEW`/`JUNK` were matched without a colon;
+- duplicate texts that were unassigned elsewhere counted as cross-cluster duplicates;
+- residual placements were mislabelled;
+- a zero calibration spread was not handled;
+- an empty eligible bank failed;
+- model reviews returning ticket ids outside the cluster failed the run instead of being sanitised.
+
+None of these fixes changes memberships, names or scores on the reference data. Behaviours kept for
+fidelity are listed in the validation doc.
+
+### 4. Public benchmark: BANKING77
+
+Test split (3,080 queries, 77 gold intents), `small` preset, domain-neutral prompts, `gpt-4o-mini` in both
+model slots. The pipeline is **not** told the number of intents; baselines that need *k* get the true 77.
+Unassigned records count as singletons.
+
+| partition | clusters | coverage | ARI | NMI | purity |
+|---|---|---|---|---|---|
+| **pipeline** | 135 | 0.981 | 0.615 | **0.857** | 0.844 |
+| k-means, oracle k = 77 | 77 | 1.000 | 0.608 | 0.845 | 0.751 |
+| UMAP + HDBSCAN | 103 | 0.894 | 0.634 | 0.855 | 0.879 |
+| agglomerative, k = 77 | 77 | 1.000 | 0.507 | 0.835 | 0.575 |
+| Leiden, mutual-kNN | 49 | 0.991 | 0.482 | 0.825 | 0.529 |
+
+The pipeline matches the best baselines without knowing *k*, assigns 98% of queries, and splits more
+finely than the gold intents. Over three seeds: NMI 0.856 ± 0.001, ARI 0.602 ± 0.009, pairwise agreement
+between runs ARI 0.760 ± 0.013.
+
+### Caveats
+
+- **Lenient judges.** With `gpt-4o-mini` as both judges, the LLM coherence evaluation is near ceiling for
+  every partition (gold 4.98, pipeline 4.98, k-means 4.93), so it cannot separate good from mediocre
+  clusters on short, clean queries. Use a stricter judge pair when the LLM evaluation has to
+  discriminate. A run with local open-weight judges is in progress.
+- **Run-to-run variation.** Results depend on embedding numerics and model non-determinism. Compare
+  runs with `clustering-harness multirun` rather than expecting identical partitions.
+- **Not yet validated:** Anthropic models (the backend is implemented and unit-tested, with no
+  end-to-end benchmark yet).
+
+**Cost.** The BANKING77 run made about 3,600 `gpt-4o-mini` requests (≈ $0.50, 13 minutes). All
+benchmarking so far cost $2.11.
 
 ## License
 
