@@ -202,3 +202,28 @@ def test_backend_settings_change_the_key():
     assert k(OllamaBackend("q")) == k(OllamaBackend("q", think=None))
     assert k(OllamaBackend("q")) != k(OllamaBackend("q", think="low"))
     assert k(AnthropicBackend("h")) != k(AnthropicBackend("h", effort="high"))
+
+
+def test_budget_without_a_ledger_is_still_enforced():
+    llm = LLM(CallableBackend(lambda r: ChatResult('{"ok": 1}', 1000, 1000), "custom:x"), name="a", budget_usd=0.001,
+              price=Price(100.0, 100.0))
+    with pytest.raises(BudgetExceeded):
+        for i in range(50):
+            llm.call("s", [{"role": "user", "content": f"q{i}"}])
+
+
+def test_budget_with_unknown_price_is_refused():
+    with pytest.raises(ValueError, match="price of custom:new-model is unknown"):
+        LLM(CallableBackend(lambda r: "{}", "custom:new-model"), name="a", budget_usd=1.0)
+    LLM(CallableBackend(lambda r: "{}", "custom:new-model"), name="a", budget_usd=1.0, price=Price(0, 0))   # explicit: ok
+
+
+def test_budget_scope_shares_one_cap(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    mk = lambda mid: LLM(CallableBackend(lambda r: ChatResult('{"ok": 1}', 1000, 1000), mid), ledger=led,   # noqa: E731
+                         budget_usd=0.01, price=Price(1000.0, 1000.0), budget_scope="gpt-4o-mini")
+    a, b = mk("openai:gpt-4o-mini"), mk("azure-openai:x:gpt-4o-mini")
+    with pytest.raises(BudgetExceeded):
+        for i in range(10):
+            (a if i % 2 else b).call("s", [{"role": "user", "content": f"q{i}"}])
+    assert led.spent("gpt-4o-mini") <= 0.01 + 1e-9

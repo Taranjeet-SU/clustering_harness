@@ -190,7 +190,10 @@ def test_assume_role_uses_sts_and_temporary_credentials(server, monkeypatch):
     assert "Credential=ASIAROLE00000000/" in h["Authorization"] and h["X-Amz-Security-Token"] == "rt"
 
 
-def test_missing_region_and_unknown_keys_fail_clearly():
+def test_missing_region_and_unknown_keys_fail_clearly(monkeypatch, tmp_path):
+    for v in ("AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE"):
+        monkeypatch.delenv(v, raising=False)
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "none"))
     with pytest.raises(ValueError, match="unknown Bedrock credential key"):
         BedrockBackend("m", credentials={"password": "x"})
     with pytest.raises(BackendError, match="no region"):
@@ -254,3 +257,13 @@ def test_invalid_model_id_is_a_config_error(server):
                         credentials={"aws_access_key_id": "AKIA1", "aws_secret_access_key": "s"})
     with pytest.raises(BackendConfigError, match="model identifier"):
         be.complete(REQ)
+
+
+def test_region_comes_from_the_aws_profile(monkeypatch, tmp_path):
+    for v in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+        monkeypatch.delenv(v, raising=False)
+    cfg = tmp_path / "config"
+    cfg.write_text("[profile research]\nregion = eu-west-3\n")
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(cfg))
+    be = BedrockBackend("m", profile_name="research", credentials={"aws_access_key_id": "AKIA1", "aws_secret_access_key": "s"})
+    assert be._resolve()["region"] == "eu-west-3"

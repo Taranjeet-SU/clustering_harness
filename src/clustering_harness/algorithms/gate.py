@@ -58,7 +58,8 @@ class Gate:
             except Exception:  # noqa: BLE001
                 ok = False
         return {"cid": cid, "rep": rep, "judge": judge, "score": score, "ok": ok, "name": str(out.get("name") or "")[:90],
-                "reason": str(out.get("reason", ""))[:200], "size": len(members)}
+                "reason": str(out.get("reason", ""))[:200], "size": len(members),
+                **({} if ok else {"raw": str(out.get("_raw") or out.get("_transport_error") or out.get("_error") or out)[:160]})}
 
     # ------------------------------------------------------------------ calibration & decision
     def calibrate(self, calls: list, force: bool = False) -> dict:
@@ -70,10 +71,10 @@ class Gate:
             v = [c["score"] for c in calls if c["ok"] and c["judge"] == j]
             if not v:
                 n = sum(1 for c in calls if c["judge"] == j)
-                raise RuntimeError(f"gate calibration: judge {j!r} returned no valid score in {n} calls (every answer "
-                                   f"failed the JSON contract). Look at the model's raw answers under <workdir>/results/; "
-                                   f"a model that cannot follow the JSON instructions needs reasoning: true, more tokens, or "
-                                   f"a different model")
+                raws = [c.get("raw", "") for c in calls if c["judge"] == j][:2]
+                raise RuntimeError(f"gate calibration: judge {j!r} ({self.ctx.llm(j).model_id}) returned no valid score in "
+                                   f"{n} calls (every answer failed the JSON contract). First answers: {raws}. A model that "
+                                   f"cannot follow the JSON instructions needs reasoning: true, more tokens, or a different model")
             b[j] = {"mu": float(np.mean(v)), "sd": float(np.std(v)) or 1.0, "n": len(v)}
             if len(v) >= 5 and float(np.std(v)) == 0.0:
                 b[j]["constant"] = True

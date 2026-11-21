@@ -122,3 +122,16 @@ def test_misspelled_field_is_an_error(db):
         Dataset.from_mongo("tickets_a", uri=URI, database=db, text_field=["subjct"])
     with pytest.raises(ValueError, match="'titel'"):
         Dataset.from_mongo("tickets_a", uri=URI, database=db, text_field="subject", title_field="titel")
+
+
+def test_unreachable_server_is_a_quick_one_line_error():
+    pytest.importorskip("pymongo")
+    with pytest.raises(ValueError, match=r"cannot reach MongoDB \(127.0.0.1:27011\)"):
+        Dataset.from_mongo("t", uri="mongodb://u:secret@127.0.0.1:27011/", database="d",
+                           client_kwargs={"serverSelectionTimeoutMS": 300})
+
+
+@needs_server
+def test_misspelled_meta_field_is_an_error(db):
+    with pytest.raises(ValueError, match="'prodcut'"):
+        Dataset.from_mongo("tickets_a", uri=URI, database=db, text_field="subject", meta_fields=["prodcut"])

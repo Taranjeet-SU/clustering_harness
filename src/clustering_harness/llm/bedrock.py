@@ -153,7 +153,14 @@ class BedrockBackend:
             creds["aws_bearer_token_bedrock"] = os.environ[self.bearer_token_env]
         creds.setdefault("region", self.region or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION"))
         if not creds["region"]:
-            raise BackendConfigError("bedrock: no region (set `region`, a credentials `region`, or AWS_REGION)")
+            try:   # the region configured for the AWS profile (~/.aws/config), as the AWS CLI would use it
+                import botocore.session
+                creds["region"] = botocore.session.Session(profile=creds.get("profile_name")).get_config_variable("region")
+            except Exception:  # noqa: BLE001 - unknown profile etc.; reported below / when the client is built
+                pass
+        if not creds["region"]:
+            raise BackendConfigError("bedrock: no region (set `region`, a credentials `region`, AWS_REGION, or a "
+                                     "region for the AWS profile)")
         return creds
 
     def _config(self, unsigned: bool = False):

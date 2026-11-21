@@ -64,8 +64,11 @@ class LLM:
     reasoning:
         Model spends hidden reasoning tokens from the generation budget (e.g. gpt-oss). Enables the
         empty-answer budget retry and text-mode judging.
-    budget_usd, ledger, price:
-        Optional hard spend cap. ``price`` defaults to the known price for the backend's model name.
+    budget_usd, ledger, price, budget_scope:
+        Optional hard spend cap. ``price`` defaults to the known price for the backend's model name; with a cap,
+        an unknown price is an error (pass ``price=Price(0, 0)`` for a free model). Without a ``ledger`` the cap
+        uses a private in-memory ledger (this object only). The cap applies to ``budget_scope`` in the ledger,
+        default the model id; give several LLMs the same scope (e.g. ``"gpt-4o-mini"``) to share one cap.
     cache_contract_failures:
         Also cache answers that stayed unparseable after the retry (default ``False``: a rerun asks again).
     legacy_cache_keys:
@@ -77,20 +80,25 @@ class LLM:
                  max_concurrency: int = 2, reasoning: bool = False, budget_usd: float | None = None,
                  ledger: Ledger | None = None, price: Price | None = None, transport_retries: int = 2,
                  max_consecutive_failures: int = 8, cache_contract_failures: bool = False,
-                 legacy_cache_keys: bool = False):
+                 legacy_cache_keys: bool = False, budget_scope: str | None = None):
         self.backend = backend
         self.name = name or backend.model_id
         self.cache = cache
         self.reasoning = reasoning
         self.max_concurrency = max_concurrency
         self._sem = threading.BoundedSemaphore(max_concurrency)
-        self.price = price or price_for(getattr(backend, "model", ""))
+        self.price = price or price_for(getattr(backend, "model", "") or backend.model_id)
+        if budget_usd is not None:
+            if ledger is None:
+                ledger = Ledger(":memory:")      # a cap must always be enforced; this one counts this object's calls
+            if price is None and self.price.input_per_mtok == 0 and self.price.output_per_mtok == 0 \
+                    and not backend.model_id.startswith(("ollama:", "offline", "callable")):
+                raise ValueError(f"{self.name}: budget_usd={budget_usd} cannot be enforced because the price of "
+                                 f"{backend.model_id} is unknown. Set price_in and price_out (USD per million tokens) "
+                                 f"for this model in the run spec (or price=Price(in, out); 0 and 0 for a free model)")
         self.ledger = ledger
-        self.budget = Budget(budget_usd, ledger, backend.model_id) if (budget_usd is not None and ledger is not None) else None
-        if budget_usd is not None and self.price.input_per_mtok == 0 and self.price.output_per_mtok == 0 \
-                and not backend.model_id.startswith(("ollama:", "offline", "callable")):
-            log.warning("%s: budget_usd=%s cannot be enforced because the price of %s is unknown; pass price=Price(in, out) "
-                        "(or price_in/price_out in a run spec)", self.name, budget_usd, backend.model_id)
+        self.budget_scope = budget_scope or backend.model_id
+        self.budget = Budget(budget_usd, ledger, self.budget_scope) if budget_usd is not None else None
         self.transport_retries = transport_retries
         self.max_consecutive_failures = max_consecutive_failures
         self.stats = {"requests": 0, "cache_hits": 0, "failures": 0, "input_tokens": 0, "output_tokens": 0,
@@ -169,13 +177,13 @@ class LLM:
                 tin, tout = res.input_tokens, res.output_tokens
                 if tin == 0 and tout == 0 and (self.price.input_per_mtok or self.price.output_per_mtok):
                     # the backend reported no usage: charge an estimate (~4 chars per token) so budgets still hold
-                    tin = sum(len(str(m.get("content", ""))) for m in messages) // 4 + 1
-                    tout = len(res.text or "") // 4 + 1
+                    tin = sum(len(str(m.get("content", ""))) for m in messages) // 3 + 1   # ~3 chars/token: errs high
+                    tout = len(res.text or "") // 3 + 1
                     if not self._zero_usage_warned:
                         self._zero_usage_warned = True
                         log.warning("%s: the backend reports no token usage; spend is estimated from text length", self.name)
                 if self.ledger is not None:
-                    self.ledger.record(self.model_id, self.model_id, stage, tin, tout, self.price.cost(tin, tout))
+                    self.ledger.record(self.budget_scope, self.model_id, stage, tin, tout, self.price.cost(tin, tout))
                 return res.text
         finally:
             if estimate:

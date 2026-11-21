@@ -113,7 +113,7 @@ def build_backend(spec: dict):
 def build_llm(spec: dict, cache: ResponseCache | None = None, ledger: Ledger | None = None, name: str | None = None) -> LLM:
     """``spec`` keys: ``backend`` (see :func:`build_backend`), ``model``, backend options, and wrapper options
     (``reasoning``, ``concurrency``, ``budget_usd``, ``price_in``, ``price_out``, ``cache_contract_failures``,
-    ``legacy_cache_keys``, ``max_consecutive_failures``)."""
+    ``legacy_cache_keys``, ``max_consecutive_failures``, ``budget_scope``)."""
     s = dict(spec)
     reasoning = bool(s.pop("reasoning", False))
     concurrency = int(s.pop("concurrency", 2))
@@ -121,7 +121,8 @@ def build_llm(spec: dict, cache: ResponseCache | None = None, ledger: Ledger | N
     pin, pout = s.pop("price_in", None), s.pop("price_out", None)
     if (pin is None) != (pout is None):
         raise ValueError("set both price_in and price_out (USD per million tokens), or neither")
-    extra = {k: s.pop(k) for k in ("cache_contract_failures", "legacy_cache_keys", "max_consecutive_failures") if k in s}
+    extra = {k: s.pop(k) for k in ("cache_contract_failures", "legacy_cache_keys", "max_consecutive_failures", "budget_scope")
+             if k in s}
     if "backend" not in s:
         raise ValueError(f"model {name or ''} needs `backend:` (one of {', '.join(backend_kinds())}, or 'package.module:Factory')")
     be = build_backend(s)

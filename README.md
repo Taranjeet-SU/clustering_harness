@@ -80,7 +80,8 @@ Without cloning: `pip install "clustering-harness[all] @ git+https://github.com/
 ## 2. Your first run (about 15 minutes)
 
 The repository ships a ready-made run on a public dataset. All you need is an OpenAI API key; the run costs
-about $0.50 and takes 13–15 minutes on a laptop CPU, most of it embedding. Before the slow part starts, the run
+about $0.50 and takes 10–15 minutes on a laptop CPU (embedding takes 1–3 minutes, the model calls most of
+the rest). Before the slow part starts, the run
 sends one tiny test request to each model, so a wrong key, model name or server address fails within seconds.
 
 ```bash
@@ -170,8 +171,8 @@ result.summary       # coverage, scores, model usage
 | **domain** | a few words about whose tickets these are (product name and description). They are inserted into every prompt. See section 7. |
 | **prompt preset** | the full set of instructions sent to the models. `default` is domain-neutral; you can copy it and add your own examples. |
 | **preset (`small` / `reference` / `auto`)** | algorithm settings tuned for about 1,000 (`small`) or about 15,000 (`reference`) records; `auto` picks by size. |
-| **workdir** | the folder a run writes to. It holds the caches, so rerunning the same spec continues where it stopped and costs nothing for work already done. |
-| **cache** | every model answer is stored by its exact request. A repeated request is answered from the cache, which makes reruns cheap and reproducible. |
+| **workdir** | the folder a run writes to. It holds the caches, so rerunning the same spec continues where it stopped and costs nothing for work already done. `clustering-harness reset run.yaml` clears its results but keeps the model answers. |
+| **cache** | every good model answer is stored by its exact request (failed requests and unparseable answers are not). A repeated request is answered from the cache, which makes reruns cheap and reproducible. |
 | **ledger** | a small database that records how much each model has cost, one row per request. |
 | **budget (`budget_usd`)** | a spending cap per model. When the ledger says the cap is reached, the run stops instead of overspending. |
 | **seed** | a number that fixes the random choices. Running several seeds (`multirun`) shows how stable the result is. |
@@ -307,7 +308,7 @@ class GatewayBackend:
     def complete(self, request):              # request.messages, request.max_tokens, request.json_mode, ...
         text = my_gateway.chat(self.model, request.messages, max_tokens=request.max_tokens)
         # report real token counts when the gateway returns them; with 0/0 the spend is estimated from the
-        # text length (about 4 characters per token) so that budgets still hold
+        # text length (about 3 characters per token) so that budgets still hold
         return ChatResult(text=text, input_tokens=0, output_tokens=0)
 
 register_backend("gateway", lambda opts: GatewayBackend(opts.pop("model"), opts.pop("timeout", 60)))
@@ -318,8 +319,13 @@ An import path only works if Python can import the module. The command line adds
 folder of the run spec, so a `my_backend.py` next to `run.yaml` just works. Anything else must be installed
 (`pip install -e path/to/your/package`) or on `PYTHONPATH`.
 
-**When a model fails.** Every failed request is logged, and only good answers are cached: a request that
-failed, or an answer that was still not valid JSON after one repair request, is asked again on a rerun. (Set
+**When a model fails.** Every failed request is logged. If any request of a stage still failed after its
+retries, the stage is **not saved**: its files are removed and the run stops with `IncompleteStageError`. Rerun
+the same command when the server is healthy. Answers that did arrive are cached, so only the failed requests
+are sent again. A run that finishes therefore never contains results built from failed requests.
+
+Only good answers are cached: a request that failed, or an answer that was still not valid JSON after one
+repair request, is asked again on a rerun. (Set
 `cache_contract_failures: true` on a model to cache those answers too; the exact-reproduction replay in
 docs/validation.md does.) A configuration problem (invalid key, no permission, unknown model, missing region)
 stops the run with the provider's message, and so do 8 failed requests in a row (`max_consecutive_failures`).
@@ -334,8 +340,9 @@ Anthropic `thinking`/`effort`, Bedrock extra request fields). Changing any of th
 
 **Which models?** Small and mid-size models work: the validation runs used a 27B Qwen model with
 `gpt-oss:20b` locally, and `gpt-4o-mini`. Two *different* models in `a` and `b` make the two-judge checks
-meaningful. With the same model in both slots the two judges usually agree, and quality scores come out
-inflated (section 13).
+meaningful. With the same model in both slots the two judges send identical requests and share cached
+answers, so every two-judge check is effectively one judge and quality scores come out inflated (section 13);
+the run warns about it.
 
 ## 6. Embeddings
 
@@ -377,8 +384,10 @@ replace its generic anchor examples with paraphrased examples from your own data
 - Every hosted request is priced (prices for common models are built in; set `price_in` / `price_out` for
   others) and written to the **ledger**. By default the ledger is `<workdir>/spend.sqlite`, so
   `budget_usd` caps the spend **of that run**.
-- A cap applies **per model** within a ledger. If slots `a` and `b` both use `gpt-4o-mini` with
-  `budget_usd: 5`, they share one $5 cap. `multirun` seeds share the main run's ledger, so the cap covers
+- A cap applies **per model id** within a ledger (`openai:gpt-4o-mini`, `azure-openai:...:gpt-4o-mini` and
+  `bedrock:...` are different ids). If slots `a` and `b` both use `gpt-4o-mini` through the same backend with
+  `budget_usd: 5`, they share one $5 cap. To share a cap across backends, give each model the same
+  `budget_scope: <name>`. `multirun` seeds share the main run's ledger, so the cap covers
   all seeds together.
 - Set `ledger: ~/.cache/clustering_harness/spend.sqlite` in several specs to cap their **combined** spend
   instead, for example for a team-wide monthly limit.
@@ -387,7 +396,11 @@ replace its generic anchor examples with paraphrased examples from your own data
   below the cap.
 - When a cap is reached, the run stops with `BudgetExceeded`. Raise the cap and rerun: cached answers are
   free, so you only pay for the rest.
-- If a hosted model's price is unknown, the budget cannot be enforced and a warning says so.
+- A cap always holds. If the model's price is unknown (a new model name, a Bedrock ARN, a custom backend),
+  setting `budget_usd` is an error until you add `price_in` / `price_out` (0 and 0 for a free model). In
+  Python, an `LLM` with `budget_usd` but no `ledger` counts its own calls in memory.
+- A backend that reports no token usage is charged an estimate (about 3 characters per token, which errs
+  high), so caps hold for custom backends too.
 - Rough cost: about 1.2 model requests per record with the `small` preset. 3,000 short records with
   `gpt-4o-mini` cost about $0.50.
 
@@ -427,7 +440,9 @@ In plain words:
    the leftovers.
 5. **Name and score.** Each cluster gets a name and rules written from its records, and both models score it.
 6. **Roll up.** Clusters a support lead would report together are merged into report lines, guarded by a
-   judge so that quality does not drop.
+   judge so that quality does not drop. Merging only happens while there are more than `rollup.target_max`
+   (default 150) clusters; at or below that, each cluster is its own line (as on BANKING77, about 135
+   clusters). Lower `pipeline.rollup.target_max` for a shorter list.
 
 Every stage, threshold and config field is specified in [docs/algorithm.md](docs/algorithm.md). Backends and
 budgets: [docs/backends.md](docs/backends.md). Metrics: [docs/evaluation.md](docs/evaluation.md).
@@ -457,17 +472,19 @@ table = compare_partitions({"pipeline": result.labels(), "kmeans": run_baseline(
 | symptom | fix |
 |---|---|
 | `CUDA out of memory` while embedding | the embedder uses the CPU unless you set `device: cuda`; remove it, or free the GPU |
-| `... holds a run with a different ...` | a workdir belongs to one dataset, configuration, prompt set (file contents and domain), model pair with its settings, and embedder with its options (all checked); use a new `workdir` after changing any of them |
+| `... holds a run with a different ...` | a workdir belongs to one dataset, configuration, prompt set (file contents and domain), model pair with its settings, and embedder with its options (all checked; settings that cannot change results, like `bank.workers`, are not). Run `clustering-harness reset run.yaml` to start over in the same workdir: it keeps the paid model answers, so unchanged requests cost nothing. `reset --from-stage rollup` keeps the earlier stages, for changes that only affect later ones |
+| `IncompleteStageError: stage ... request(s) failed` | the model server failed some requests; nothing from that stage was saved. Rerun when it is healthy: only the failed requests are sent again |
 | `ModelUnavailableError: ... cannot be used` | the provider rejected the settings (key, permission, model name, region); fix them and rerun. Nothing failed was cached |
 | `ModelUnavailableError: ... requests in a row failed` | the server is down, unreachable or rate-limiting; the log shows each error. Rerun when it's back |
 | `ModuleNotFoundError` for a `module:Class` backend | put the module next to the run spec, install your package, or add it to `PYTHONPATH` |
-| `judge 'a' ... gave all N calibration answers the same score` | that model is not really judging (a stub, a broken prompt, or a model too weak for the task); use another model. The run stops here unless `pipeline.gate.allow_constant_judge: true` |
+| `judge 'a' ... gave all N calibration answers the same score` | that model is not really judging (a stub, a broken prompt, or a model too weak for the task); use another model. The run stops here unless `pipeline.gate.allow_constant_judge: true` (which can be added to the same workdir) |
 | `... did not answer a test request` | the test request sent before embedding failed; check the model name, key, URL and network |
 | `unknown run spec key(s)` / `unknown data key(s)` / `pipeline.preset ...` | a typo in the spec; the message suggests the closest valid name |
 | `field(s) not found in any of the N documents` | a MongoDB field name is wrong; the message lists the fields it saw |
 | `no MongoDB connection string` | set `MONGODB_URI` (or the variable named by `uri_env`), or give `uri:` |
 | `BudgetExceeded` | raise `budget_usd` and rerun; finished work is cached |
-| warning `budget_usd ... cannot be enforced` | set `price_in` / `price_out` for that model |
+| `budget_usd=... cannot be enforced because the price ... is unknown` | set `price_in` / `price_out` for that model (0 and 0 if it is free) |
+| `cannot reach MongoDB (...)` | check the URI, the network and that the server runs (fails after 10 s; change with `client_kwargs: {serverSelectionTimeoutMS: ...}`) |
 | local models are slow | lower `concurrency` to what your GPU serves, or use a smaller model for one slot |
 | `dataset ... has no records` | check the file path and the Mongo query (missing collections are reported by name) |
 | a plain `error: ...` line | the command line prints one line for expected errors; add `-v` to see the full traceback |
@@ -561,8 +578,14 @@ between runs ARI 0.760 ± 0.013.
 
 **Independent reproduction.** A separate agent, starting from the README with no other help, reproduced
 the table: pipeline ARI 0.622, NMI 0.860, coverage 0.977, 133 clusters, and identical baseline rows
-(12.4 minutes, $0.49). Its review led to the fixes in this version: the CPU default for embeddings,
-compatibility with recent transformers, this example config, and these docs.
+(12.4 minutes, $0.49). Later independent reproductions on 0.1 and 0.2 gave ARI 0.615 / 0.604 / 0.616 and NMI
+0.857 / 0.853 / 0.858, with identical baseline rows each time. Their reviews led to the robustness fixes in
+this version.
+
+**Claude Haiku in both slots** (`claude-haiku-5-5`): 156 clusters, ARI 0.552, NMI 0.845, purity 0.842,
+coverage 0.986. Haiku splits more finely; its 110 report lines reach ARI 0.605 and NMI 0.859, on par with
+the `gpt-4o-mini` clusters. 12.4 minutes, about $0.95 including the judge column. Details in
+[docs/validation.md](docs/validation.md).
 
 ### Caveats
 
@@ -576,8 +599,9 @@ compatibility with recent transformers, this example config, and these docs.
   Leiden 4.74, pipeline 4.93) but are still near ceiling.
 - **Run-to-run variation.** Results depend on embedding numerics and model non-determinism. Compare
   runs with `clustering-harness multirun` rather than expecting identical partitions.
-- **Not yet benchmarked end to end:** Anthropic, Bedrock, Azure and Gemini backends. They are implemented and
-  tested against their wire protocols, but no full benchmark run has used them yet.
+- **Not yet benchmarked end to end:** Bedrock, Azure and Gemini backends. They are implemented and tested
+  against their wire protocols, but no full benchmark run has used them yet. (OpenAI, Anthropic and local
+  Ollama models have been benchmarked.)
 
 **Cost.** The BANKING77 run made about 3,600 `gpt-4o-mini` requests (≈ $0.50, 13 minutes). All
 benchmarking, including the independent reproduction, cost about $4.20.

@@ -93,9 +93,13 @@ def load_mongo_frame(collection: str | list[str], database: str | None = None, u
         if not uri:
             raise ValueError(f"no MongoDB connection string: set the {uri_env} environment variable (or pass uri=..., "
                              f"e.g. mongodb://localhost:27017)")
-        client = MongoClient(uri, **(client_kwargs or {}))
+        client = MongoClient(uri, **{"serverSelectionTimeoutMS": 10000, **(client_kwargs or {})})
     try:
-        db = client[database] if database else client.get_default_database()
+        from pymongo.errors import ConfigurationError
+        try:
+            db = client[database] if database else client.get_default_database()
+        except ConfigurationError:
+            raise ValueError("no database given: set `database:` or put the database name in the connection string") from None
         if id_with_collection is None:
             id_with_collection = len(colls) > 1
         base_q = _ejson(query) or {}
@@ -105,9 +109,19 @@ def load_mongo_frame(collection: str | list[str], database: str | None = None, u
         proj = projection
         if isinstance(proj, list):
             proj = {f: 1 for f in proj}
+        from pymongo.errors import OperationFailure, ServerSelectionTimeoutError
         try:
             existing = set(db.list_collection_names())
-        except Exception:  # noqa: BLE001 - the user may lack listCollections; then reading is the only check
+        except ServerSelectionTimeoutError as e:
+            try:   # host names only, never the credentials of the connection string
+                from pymongo.uri_parser import parse_uri
+                host = ", ".join(f"{h}:{p}" for h, p in parse_uri(uri)["nodelist"]) if uri else ""
+            except Exception:  # noqa: BLE001
+                host = ""
+            raise ValueError(f"cannot reach MongoDB ({host or 'see the connection string'}) within "
+                             f"{client.options.server_selection_timeout:g} s: check the URI, network and that the server "
+                             f"is running") from None
+        except OperationFailure:   # the user may lack listCollections; then reading is the only check
             existing = None
         if existing is not None:
             missing = [c for c in colls if c not in existing]
@@ -117,7 +131,7 @@ def load_mongo_frame(collection: str | list[str], database: str | None = None, u
                 hint = "; ".join(f"{c!r} (did you mean {h[0]!r}?)" if h else repr(c) for c, h in hints.items())
                 raise ValueError(f"collection(s) not found in database {db.name!r}: {hint}. "
                                  f"Collections there: {sorted(existing)[:20]}")
-        fields = {f: 0 for f in text_fields + [x for x in (title_field, label_field) if x]}
+        fields = {f: 0 for f in text_fields + [x for x in (title_field, label_field) if x] + list(meta_fields or [])}
         seen_keys: set = set()
         rows = []
         for name in colls:

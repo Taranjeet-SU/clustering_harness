@@ -90,3 +90,27 @@ def test_data_path_is_found_next_to_the_spec(tmp_path, monkeypatch):
     s = _spec(tmp_path, "data: {path: d.csv}\n" + MODELS)
     monkeypatch.chdir("/")
     assert load_spec(s)["data"]["path"] == str(tmp_path / "d.csv")
+
+
+def test_domain_and_prompt_typos(tmp_path, capsys):
+    base = "workdir: w\ndata: {path: d.csv}\n" + MODELS
+    assert main(["run", _spec(tmp_path, base + "pipeline: {domain: {prodct: X}}\n")]) == 2
+    assert "'prodct' (did you mean 'product'?)" in capsys.readouterr().err
+    assert main(["run", _spec(tmp_path, base + "pipeline: {prompts: defualt}\n")]) == 2
+    assert "unknown prompt preset 'defualt' (did you mean 'default'?)" in capsys.readouterr().err
+    assert main(["run", _spec(tmp_path, base + "pipeline: {preset: refrence}\n")]) == 2
+    assert "(did you mean 'reference'?)" in capsys.readouterr().err
+
+
+def test_reset_command_keeps_model_answers(tmp_path, capsys):
+    wd = tmp_path / "w"
+    for f in ("cache/llm.sqlite", "spend.sqlite", "manifest.json", "results/base/labels.npy", "output/summary.json",
+              "results/rollup/lines.csv", "cache/labels/l.npy"):
+        (wd / f).parent.mkdir(parents=True, exist_ok=True)
+        (wd / f).write_text("x")
+    s = _spec(tmp_path, f"workdir: {wd}\ndata: {{path: d.csv}}\n" + MODELS)
+    assert main(["reset", s, "--from-stage", "rollup"]) == 0
+    assert not (wd / "results/rollup").exists() and not (wd / "output").exists() and (wd / "results/base/labels.npy").exists()
+    assert main(["reset", s]) == 0
+    assert sorted(str(p.relative_to(wd)) for p in wd.rglob("*") if p.is_file()) == ["cache/labels/l.npy", "cache/llm.sqlite",
+                                                                                   "spend.sqlite"]

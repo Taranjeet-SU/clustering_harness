@@ -4,6 +4,7 @@
     clustering-harness run     run.yaml [--until STAGE]
     clustering-harness compare run.yaml --baselines kmeans:k=77 hdbscan:min_cluster_size=10 [--judge] [--judge-max-clusters 60]
     clustering-harness multirun run.yaml --seeds 0 1 2
+    clustering-harness reset   run.yaml [--from-stage STAGE]         # start over, keeping the paid model answers
     clustering-harness evaluate --assignments runs/x/output/assignments.csv --gold data.csv --id-col id --label-col label
     clustering-harness datasets [--export banking77 --split test --out gold.csv]
 
@@ -107,10 +108,15 @@ def load_spec(path: str | Path) -> dict:
         d["path"] = _resolve_input(d["path"], base)
     p = spec.get("pipeline") or {}
     if p.get("preset", "auto") not in PRESETS:
-        raise ValueError(f"pipeline.preset {p['preset']!r} is not one of {', '.join(PRESETS)}")
+        import difflib
+        near = difflib.get_close_matches(str(p["preset"]), PRESETS, 1)
+        raise ValueError(f"pipeline.preset {p['preset']!r} is not one of {', '.join(PRESETS)}"
+                         + (f" (did you mean {near[0]!r}?)" if near else ""))
     pr = str(p.get("prompts", ""))
     if pr.endswith((".yaml", ".yml")):
         p["prompts"] = _resolve_input(pr, base)
+    from .prompts import PromptSet
+    PromptSet.load(p.get("prompts", "default"), domain=p.get("domain") or None)   # unknown preset / domain keys fail now
     missing = {"a", "b"} - set(spec["models"] or {})
     if missing:
         raise ValueError(f"models: slots 'a' and 'b' are both required (missing {sorted(missing)})")
@@ -230,6 +236,14 @@ def _main(argv=None) -> int:
                        description="Run the pipeline once per seed (seeds must be in pipeline.bank.seeds). The seed equal to "
                        "the spec's own seed reuses the main run in <workdir>.")
     s.add_argument("spec", help="run spec YAML"); s.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2], help="default: 0 1 2")
+    s = sub.add_parser("reset", help="delete a run's stage outputs but keep the paid model answers",
+                       description="Delete the stage outputs and manifest of the spec's workdir, keeping the model-answer "
+                       "cache, label vectors and spend ledger. The next `run` may then use changed data, settings, prompts "
+                       "or models; requests whose prompt did not change are answered from the cache for free. With "
+                       "--from-stage only that stage and later ones are deleted; use it only when your change cannot "
+                       "affect the earlier stages (e.g. a scoring or rollup setting).")
+    s.add_argument("spec", help="run spec YAML")
+    s.add_argument("--from-stage", default=None, choices=STAGES, metavar="STAGE", help=f"one of: {', '.join(STAGES)}")
     s = sub.add_parser("evaluate", help="score an assignments.csv against gold labels",
                        description="External metrics of output/assignments.csv against a gold CSV "
                        "(create one for a built-in dataset with `datasets --export`).")
@@ -274,6 +288,17 @@ def _main(argv=None) -> int:
         gold = pd.read_csv(a.gold, dtype=str).fillna("")
         m = asg.merge(gold[[a.id_col, a.label_col]], left_on="ticket_id", right_on=a.id_col, how="inner")
         print(json.dumps(external_metrics(m[a.label_col].tolist(), m[a.level].tolist()), indent=1, default=float))
+        return 0
+    if a.cmd == "reset":
+        from .pipeline import reset_workdir
+        spec = yaml.safe_load(Path(a.spec).read_text()) or {}
+        wd = Path(spec.get("workdir") or f"runs/{Path(a.spec).stem}").expanduser()
+        if not wd.exists():
+            raise FileNotFoundError(f"workdir {wd} does not exist (nothing to reset)")
+        removed = reset_workdir(wd, a.from_stage)
+        print(f"removed {len(removed)} item(s) from {wd}; kept the model-answer cache and spend ledger")
+        if a.from_stage:
+            print(f"the stages before {a.from_stage!r} were kept as they are; the next run trusts them")
         return 0
     spec = load_spec(a.spec)
     if a.cmd == "run":

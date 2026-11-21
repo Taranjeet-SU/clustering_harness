@@ -11,8 +11,8 @@ Core objects:
 """
 from .config import PipelineConfig
 from .data import Dataset, JunkRule, TextTemplate
-from .pipeline import ClusteringResult, Pipeline
+from .pipeline import ClusteringResult, IncompleteStageError, Pipeline
 from .prompts import PromptSet
 
 __version__ = "0.2.0"
-__all__ = ["Dataset", "JunkRule", "TextTemplate", "PipelineConfig", "Pipeline", "ClusteringResult", "PromptSet", "__version__"]
+__all__ = ["Dataset", "JunkRule", "TextTemplate", "PipelineConfig", "Pipeline", "ClusteringResult", "IncompleteStageError", "PromptSet", "__version__"]

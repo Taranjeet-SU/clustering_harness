@@ -130,6 +130,26 @@ gold metrics do. It is still near ceiling on these short, clean queries.
 Cost of the single run: 3,613 gpt-4o-mini requests, 2.4 M input and 0.22 M output tokens (≈ $0.50 at list
 price), 13 minutes wall-clock.
 
+**Claude Haiku in both slots.** The same benchmark with `claude-haiku-5-5` (Anthropic API) in both slots,
+everything else unchanged (package 0.2.0):
+
+| partition | clusters | coverage | ARI | NMI | purity | LLM judge (40 clusters) |
+|---|---|---|---|---|---|---|
+| **pipeline clusters** | 156 | 0.986 | 0.552 | 0.845 | 0.842 | 4.75 |
+| **pipeline report lines** | 110 | 0.986 | 0.605 | 0.859 | 0.808 | 4.73 |
+| k-means, k = 77 | 77 | 1.000 | 0.608 | 0.845 | 0.751 | 4.39 |
+| UMAP + HDBSCAN | 103 | 0.894 | 0.634 | 0.855 | 0.879 | 4.74 |
+| agglomerative, k = 77 | 77 | 1.000 | 0.507 | 0.835 | 0.575 | 4.22 |
+| Leiden, mutual-kNN | 49 | 0.991 | 0.482 | 0.825 | 0.529 | 4.33 |
+| gold labels | 77 | 1.000 | 1.000 | 1.000 | 1.000 | 4.63 |
+
+Haiku splits more finely than `gpt-4o-mini` (156 clusters against 135), which lowers the cluster-level ARI
+(0.552 against 0.615) at a similar NMI and purity. Because there are more than 150 clusters, the rollup merges
+them into 110 report lines, and at that level ARI and NMI (0.605, 0.859) match the `gpt-4o-mini` clusters. As a
+judge of its own clusters Haiku is near ceiling (it scores the pipeline above the gold labels), so its LLM-judge
+column does not discriminate. Cost: 5,990 requests, 5.4 M input and 0.82 M output tokens (≈ $0.95 at the
+built-in list price, including the judge column), 12.4 minutes wall-clock.
+
 ## 4. Stage conformance tests
 
 `tests/unit/test_*_conformance.py` test each stage against the written specification

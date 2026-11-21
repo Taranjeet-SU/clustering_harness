@@ -30,9 +30,49 @@ from .embeddings import Embedder, l2_normalize
 from .llm import ResponseCache
 from .prompts import PromptSet
 
-__all__ = ["Pipeline", "ClusteringResult", "STAGES"]
+__all__ = ["Pipeline", "ClusteringResult", "STAGES", "IncompleteStageError", "reset_workdir"]
 
 log = logging.getLogger("clustering_harness")
+
+#: files and folders (relative to the workdir) written by each stage; ``*`` globs
+STAGE_FILES = {
+    "embed": ("cache/embeddings.npy", "cache/embeddings.ids.json"),
+    "bank": ("results/bank", "results/base", "cache/partitions", "cache/geom"),
+    "cascade": ("results/cascade_*", "results/cascade_log.json", "cache/cascade", "cache/gate_calibration.json"),
+    "residual": ("results/residual", "cache/residual"),
+    "refile": ("results/refile", "cache/refile"),
+    "scoring": ("results/scoring", "cache/scoring", "cache/scoring_evidence"),
+    "rollup": ("results/rollup",),
+    "export": ("output",),
+}
+
+
+def reset_workdir(workdir: str | Path, from_stage: str | None = None) -> list[str]:
+    """Delete stage outputs but keep the paid model answers (``cache/llm.sqlite``), label vectors and spend ledger.
+
+    Without ``from_stage`` every stage is removed together with the manifest, so the next run may use new
+    data, settings, prompts or models; requests whose prompt did not change are still answered from the cache.
+    With ``from_stage`` that stage and all later ones are removed and the earlier ones are kept; the manifest
+    is removed too, so only do this when your change cannot affect the kept stages. Returns removed paths."""
+    import shutil
+    wd = Path(workdir)
+    if from_stage is not None and from_stage not in STAGES:
+        raise ValueError(f"unknown stage {from_stage!r}; stages are: {', '.join(STAGES)}")
+    stages = STAGES[STAGES.index(from_stage):] if from_stage else STAGES
+    pats = [p for st in stages for p in STAGE_FILES[st]] + ["manifest.json", "config.yaml", "progress.json"]
+    if from_stage is None:
+        pats.append("cache/judge.jsonl")
+    removed = []
+    for pat in pats:
+        for p in sorted(wd.glob(pat)):
+            shutil.rmtree(p) if p.is_dir() else p.unlink()
+            removed.append(str(p.relative_to(wd)))
+    return removed
+
+
+class IncompleteStageError(RuntimeError):
+    """Model requests failed during a stage, so the stage was not saved; rerun to retry only those requests."""
+
 
 STAGES = ("embed", "bank", "cascade", "residual", "refile", "scoring", "rollup", "export")
 
@@ -122,6 +162,11 @@ class Pipeline:
         missing = {"a", "b"} - set(self.llms)
         if missing:
             raise ValueError(f"llms must define slots 'a' and 'b' (missing {sorted(missing)})")
+        a, b = self.llms["a"], self.llms["b"]
+        if a.model_id == b.model_id and a.settings == b.settings:
+            log.warning("slots a and b use the same model (%s): the two judges send identical requests and share cached "
+                        "answers, so the two-judge checks act as one judge and quality scores run high. Use two "
+                        "different models for an independent second opinion.", a.model_id)
         for m in self.llms.values():
             if m.cache is None:
                 m.cache = ResponseCache(self.workdir / "cache" / "llm.sqlite")
@@ -184,7 +229,71 @@ class Pipeline:
 
     # ------------------------------------------------------------------ run
     def run(self, ds: Dataset, until: str | None = None) -> ClusteringResult | None:
-        """Run (or resume) the pipeline. ``until`` stops after one of :data:`STAGES`."""
+        """Run (or resume) the pipeline. ``until`` stops after one of :data:`STAGES`.
+
+        A stage during which any model request failed (after retries) is not saved: its files are removed and
+        :class:`IncompleteStageError` is raised. The answers that did arrive are cached, so rerunning asks only
+        the failed requests again."""
+        self._snap = None
+        try:
+            return self._run(ds, until)
+        except BaseException:
+            self._discard_failed_stage()
+            raise
+
+    def reset(self, from_stage: str | None = None) -> list[str]:
+        """See :func:`reset_workdir`."""
+        return reset_workdir(self.workdir, from_stage)
+
+    # ------------------------------------------------------------------ failed-request guard
+    def _unique_llms(self) -> list:
+        out, seen = [], set()
+        for m in self.llms.values():
+            if id(m) not in seen:
+                seen.add(id(m))
+                out.append(m)
+        return out
+
+    def _failed_requests(self) -> int:
+        return sum(m.stats.get("uncached_failures", 0) for m in self._unique_llms())
+
+    _KEEP = ("manifest.json", "config.yaml", "spend.sqlite", "cache/llm.sqlite", "cache/embeddings")
+
+    def _files(self) -> set:
+        wd = self.workdir
+        return {p for p in wd.rglob("*") if p.is_file()
+                and not str(p.relative_to(wd)).replace("\\", "/").startswith(self._KEEP)}
+
+    def _stage_start(self, stage: str) -> None:
+        self._snap = (stage, self._failed_requests(), self._files())
+
+    def _discard_failed_stage(self) -> int:
+        """Remove the files written by the current stage if model requests failed during it; returns the count."""
+        if not getattr(self, "_snap", None):
+            return 0
+        stage, f0, files0 = self._snap
+        n = self._failed_requests() - f0
+        if n > 0:
+            for p in self._files() - files0:
+                p.unlink(missing_ok=True)
+                for d in p.parents:          # and the folders that are now empty
+                    if d == self.workdir or any(d.iterdir()):
+                        break
+                    d.rmdir()
+            log.error("%s: %d model request(s) failed; the stage was not saved", stage, n)
+        self._snap = None
+        return n
+
+    def _stage_end(self) -> None:
+        stage = self._snap[0] if self._snap else "?"
+        n = self._discard_failed_stage()
+        if n:
+            raise IncompleteStageError(
+                f"stage {stage!r}: {n} model request(s) failed after retries (see the warnings above), so its results "
+                f"were not saved. Rerun the same command when the model server is healthy: answers that arrived are "
+                f"cached, so only the failed requests are sent again.")
+
+    def _run(self, ds: Dataset, until: str | None = None) -> ClusteringResult | None:
         T0 = time.time()
         if until is not None and until not in STAGES:
             raise ValueError(f"unknown stage {until!r} for until; stages are: {', '.join(STAGES)}")
@@ -212,13 +321,15 @@ class Pipeline:
                                    "label_embedder_options", "vectors_fingerprint")
                        if k in prev and prev[k] != manifest[k]]
             if changed:
-                raise ValueError(f"{wd} holds a run with a different {', '.join(changed)}; its cached stages would be "
-                                 f"mixed with the new settings. Use a new workdir (or delete this one).")
+                raise ValueError(f"{wd} holds a run with a different {', '.join(changed)}; its saved stages would be "
+                                 f"mixed with the new settings. Start over in the same workdir with `clustering-harness "
+                                 f"reset <spec>` (keeps the paid model answers, so unchanged requests stay free), or use a "
+                                 f"new workdir.")
         manifest["first_run_environment"] = manifest.get("first_run_environment") or manifest["environment"]
+        if self.preflight and until not in ("embed", "bank") and not (wd / "output" / "assignments.csv").exists():
+            self._preflight()          # before the manifest is written, so a corrected model name is not refused
         write_json(manifest, old)
         self.cfg.to_file(wd / "config.yaml")
-        if self.preflight and until not in ("embed", "bank") and not (wd / "output" / "assignments.csv").exists():
-            self._preflight()
         X = self._embed(ds)
         ctx = RunContext(ds=ds, cfg=self.cfg, llms=self.llms, workdir=wd, X=X, label_embedder=self.label_embedder,
                          prompts=self._prompts(), progress_cb=self.progress)
@@ -250,13 +361,16 @@ class Pipeline:
 
         # cascade ---------------------------------------------------------------------
         cb = wd / "results" / "cascade_B" / "assignments.csv"
+        self._stage_start("cascade")
         if not cb.exists():
             Cascade(ctx, gate).run(base_labels)
+        self._stage_end()
         if until == "cascade":
             return None
 
         # residual (C_full) -------------------------------------------------------------
         cf_p = wd / "results" / "residual" / "assignments.csv"
+        self._stage_start("residual")
         if not cf_p.exists():
             b = pd.read_csv(cb, dtype=str).fillna("")
             lab, names = self._lab(b)
@@ -267,11 +381,13 @@ class Pipeline:
             cf_p.parent.mkdir(parents=True, exist_ok=True)
             f.to_csv(cf_p, index=False)
             ctx.save(r["log"], "results", "residual", "log.json")
+        self._stage_end()
         if until == "residual":
             return None
 
         # refile (C_full_v2) --------------------------------------------------------------
         v2_p = wd / "results" / "refile" / "assignments.csv"
+        self._stage_start("refile")
         if not v2_p.exists():
             a = pd.read_csv(cf_p, dtype=str).fillna("")
             if self.cfg.residual.refile:
@@ -289,12 +405,14 @@ class Pipeline:
             else:
                 v2_p.parent.mkdir(parents=True, exist_ok=True)
                 a.to_csv(v2_p, index=False)
+        self._stage_end()
         if until == "refile":
             return None
 
         # scoring ------------------------------------------------------------------------
         sc_p = wd / "results" / "scoring" / "cluster_scores.csv"
         final = pd.read_csv(v2_p, dtype=str).fillna("")
+        self._stage_start("scoring")
         if not sc_p.exists():
             from .algorithms.scoring import ClusterScorer
             groups = {c: g.ticket_id.tolist() for c, g in final[final.status == "cluster"].groupby("cluster_id")}
@@ -309,12 +427,14 @@ class Pipeline:
         score = pd.read_csv(sc_p, dtype={"cluster_id": str})
         newnames = dict(zip(score.cluster_id, score.cluster_name))
         final["cluster_name"] = [newnames.get(c, "") for c in final.cluster_id]
+        self._stage_end()
         if until == "scoring":
             return None
 
         # rollup --------------------------------------------------------------------------
         lines = None
         ro_p = wd / "results" / "rollup" / "lines.csv"
+        self._stage_start("rollup")
         if self.cfg.rollup.enabled and len(score):
             if not ro_p.exists():
                 from .algorithms.rollup import Rollup
@@ -334,6 +454,7 @@ class Pipeline:
             lnames = ctx.load("results", "rollup", "line_names.json")
             final["line_id"] = [c2l.get(c, "") for c in final.cluster_id]
             final["line_name"] = [lnames.get(l, "") for l in final.line_id]
+        self._stage_end()
         if until == "rollup":
             return None
 

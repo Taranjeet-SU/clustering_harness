@@ -236,3 +236,86 @@ def test_dead_server_fails_the_test_request(run, tmp_path):
     llms["a"] = LLM(CallableBackend(down, "fake:a"), name="a")
     with pytest.raises(ModelUnavailableError, match="did not answer a test request: connection refused"):
         Pipeline(config(), llms=llms, label_embedder=HashEmbedder(), vectors=X, workdir=tmp_path / "w").run(ds)
+
+
+def test_failed_requests_mean_the_stage_is_not_saved_and_a_rerun_retries_them(run, tmp_path):
+    ds, X, *_ = run
+    from clustering_harness import IncompleteStageError
+    from clustering_harness.llm import BackendError
+    llms, _ = fake_llms()
+    good = llms["a"].backend.fn
+    state = {"n": 0, "healthy": False}
+
+    import zlib
+
+    def flaky(req):          # about a third of the distinct requests fail on every attempt until the server heals
+        state["n"] += 1
+        if not state["healthy"] and zlib.crc32(str(req.messages[-1]["content"]).encode()) % 3 == 0:
+            raise BackendError("502 bad gateway")
+        return good(req)
+
+    llms["a"].backend.fn = flaky
+    llms["a"].max_consecutive_failures = 1000
+    wd = tmp_path / "flaky"
+    with pytest.raises(IncompleteStageError, match="stage 'cascade': .* request\\(s\\) failed"):
+        Pipeline(config(), llms=llms, label_embedder=HashEmbedder(), vectors=X, workdir=wd).run(ds)
+    assert not (wd / "results" / "cascade_B").exists() and not (wd / "cache" / "gate_calibration.json").exists()
+    assert (wd / "results" / "base" / "labels.npy").exists()         # the stage before is kept
+    state["healthy"] = True
+    llms2, _ = fake_llms()
+    llms2["a"].backend.fn = flaky
+    res = Pipeline(config(), llms=llms2, label_embedder=HashEmbedder(), vectors=X, workdir=wd).run(ds)
+    assert llms2["a"].stats["requests"] > 0 and llms2["a"].stats["cache_hits"] > 0   # failed ones asked again
+    assert res.summary["records"] == len(ds)
+
+
+def test_corrected_model_name_is_accepted_after_a_failed_test_request(run, tmp_path):
+    ds, X, *_ = run
+    from clustering_harness.llm import LLM, BackendConfigError, CallableBackend, ModelUnavailableError
+
+    def bad(req):
+        raise BackendConfigError("404 model not found")
+
+    llms, _ = fake_llms()
+    good_a = llms["a"]
+    llms["a"] = LLM(CallableBackend(bad, "fake:typo"), name="a")
+    wd = tmp_path / "w"
+    with pytest.raises(ModelUnavailableError):
+        Pipeline(config(), llms=llms, label_embedder=HashEmbedder(), vectors=X, workdir=wd).run(ds, until="cascade")
+    llms["a"] = good_a
+    Pipeline(config(), llms=llms, label_embedder=HashEmbedder(), vectors=X, workdir=wd).run(ds, until="cascade")
+
+
+def test_settings_that_do_not_change_results_keep_the_workdir(run):
+    ds, X, wd, res, *_ = run
+    cfg = config()
+    cfg.bank = cfg.bank.model_copy(update={"workers": 2})
+    cfg.gate = cfg.gate.model_copy(update={"allow_constant_judge": True})
+    cfg.scoring = cfg.scoring.model_copy(update={"concurrency": 1})
+    assert cfg.fingerprint() == config().fingerprint()
+    llms, _ = fake_llms()
+    Pipeline(cfg, llms=llms, label_embedder=HashEmbedder(), vectors=X, workdir=wd).run(ds)
+
+
+def test_reset_keeps_the_model_answers(run, tmp_path):
+    ds, X, wd, *_ = run
+    import shutil
+    from clustering_harness.pipeline import reset_workdir
+    wd2 = tmp_path / "copy"
+    shutil.copytree(wd, wd2)
+    removed = reset_workdir(wd2)
+    assert "manifest.json" in removed and "output" in removed
+    assert (wd2 / "cache" / "llm.sqlite").exists() and not (wd2 / "results" / "base").exists()
+    llms, _ = fake_llms()
+    res = Pipeline(config(), llms=llms, label_embedder=HashEmbedder(), vectors=X, workdir=wd2).run(ds)
+    assert all(m.stats["requests"] == 1 for m in llms.values())       # only the test request; the rest from the kept cache
+    assert res.summary["records"] == len(ds)
+
+
+def test_same_model_in_both_slots_warns(caplog, tmp_path):
+    import logging
+    from clustering_harness.llm import LLM, CallableBackend
+    be = CallableBackend(lambda r: "{}", "one:model")
+    with caplog.at_level(logging.WARNING, logger="clustering_harness"):
+        Pipeline(config(), llms={"a": LLM(be), "b": LLM(be)}, workdir=tmp_path / "w")
+    assert "slots a and b use the same model" in caplog.text

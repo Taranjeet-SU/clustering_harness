@@ -59,9 +59,11 @@ class Ledger:
 
     def __init__(self, path: str | os.PathLike):
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if str(path) != ":memory:":
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(self.path, check_same_thread=False, timeout=60, isolation_level=None)
+        self._conn = sqlite3.connect(str(path) if str(path) == ":memory:" else self.path, check_same_thread=False,
+                                     timeout=60, isolation_level=None)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("CREATE TABLE IF NOT EXISTS usage (t REAL, scope TEXT, model TEXT, stage TEXT, "
                            "input_tokens INTEGER, output_tokens INTEGER, usd REAL)")

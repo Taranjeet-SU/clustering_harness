@@ -100,8 +100,11 @@ Cache keys include `LLM.settings`: the `reasoning` flag plus each backend's `cac
 change answers without changing the request, non-default values only). A custom backend may define
 `cache_settings()` too. `legacy_cache_keys=True` leaves them out, to reuse caches written before 0.2.
 
-A backend that reports 0 input and 0 output tokens is charged an estimate (about 4 characters per token) when
-its model has a price, so budgets still hold. `timeout` and `max_retries` are spec options for `openai`,
+A backend that reports 0 input and 0 output tokens is charged an estimate (about 3 characters per token, which
+errs high) when its model has a price, so budgets still hold.
+
+A stage during which any request failed after its retries is not saved (`IncompleteStageError`); the answers
+that arrived are cached, so a rerun sends only the failed requests again. `timeout` and `max_retries` are spec options for `openai`,
 `openai_compatible`, `azure_openai`, `gemini`, `anthropic` and `bedrock`. Bedrock's "invalid model identifier"
 error is a configuration error.
 
@@ -122,6 +125,11 @@ Every non-cached call records input/output tokens and USD (price table `PRICES_P
 `BudgetExceeded`; the run stops instead of overspending. Point several runs at the same ledger for a global
 cap. `ledger.summary()` reports spend per model. Cached answers cost nothing, so resumed runs are free up to
 the point of interruption.
+
+Caps fail closed: with `budget_usd`, an unknown price is an error (pass `price=Price(in, out)`, or `Price(0, 0)`
+for a free model), and an `LLM` without a `ledger` uses a private in-memory one. The cap's scope is the model id
+unless `budget_scope="..."` is given; LLMs with the same scope share one cap, e.g. the same model reached through
+OpenAI and Azure.
 
 ## Embedders
 

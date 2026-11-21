@@ -1,9 +1,9 @@
 # Reproduces the BANKING77 row of the README "Validation" table (gpt-4o-mini in both model slots, CPU embeddings).
 #   export OPENAI_API_KEY=...
-#   clustering-harness -v run examples/banking77.yaml                       # ~13 min, ~$0.50
+#   clustering-harness -v run examples/banking77.yaml                       # 10-15 min, ~$0.50
 #   clustering-harness compare examples/banking77.yaml --baselines kmeans:k=77 agglomerative_cosine_average:k=77 \
 #       umap_hdbscan:min_cluster_size=10 hdbscan:min_cluster_size=10 leiden_knn:resolution=1.0      # the full README table
-#   add --judge --judge-max-clusters 40 for the LLM-judge column (~$0.10)
+#   add --judge --judge-max-clusters 40 for the LLM-judge column (~$0.15)
 workdir: runs/banking77
 data: {dataset: banking77, split: test}
 pipeline:

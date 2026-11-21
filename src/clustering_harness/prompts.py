@@ -83,7 +83,13 @@ class PromptSet:
         """Load a built-in preset by name, or a YAML file by path."""
         if preset.endswith((".yaml", ".yml")) or "/" in preset:
             return cls.from_yaml(preset, domain, overrides)
-        text = resources.files("clustering_harness.presets").joinpath(f"{preset}.yaml").read_text()
+        try:
+            text = resources.files("clustering_harness.presets").joinpath(f"{preset}.yaml").read_text()
+        except (FileNotFoundError, OSError):
+            import difflib
+            near = difflib.get_close_matches(preset, list_presets(), 1)
+            raise ValueError(f"unknown prompt preset {preset!r}" + (f" (did you mean {near[0]!r}?)" if near else "")
+                             + f"; built-in presets: {', '.join(list_presets())}, or give a path to a prompt YAML") from None
         return cls._build(yaml.safe_load(text), preset, domain, overrides)
 
     @classmethod
@@ -92,6 +98,14 @@ class PromptSet:
         dom = dict(data.get("domain", {}))
         dom.update(domain or {})
         tpls.update(overrides or {})
+        used = set(dict(data.get("domain", {}))) | {m for v in tpls.values() for m in _SLOT.findall(str(v))}
+        unknown = [k for k in (domain or {}) if k not in used]
+        if unknown:
+            import difflib
+            hint = "; ".join(f"{k!r}" + (f" (did you mean {m[0]!r}?)" if (m := difflib.get_close_matches(k, sorted(used), 1)) else "")
+                             for k in unknown)
+            raise ValueError(f"domain key(s) not used by prompt set {name!r}: {hint}. Keys it uses: "
+                             f"{', '.join(sorted(dict(data.get('domain', {}))))}")
         # domain variables are substituted once at load time; data slots stay for render()
         if dom:
             pat = re.compile(r"\{\{(" + "|".join(map(re.escape, dom)) + r")\}\}")
