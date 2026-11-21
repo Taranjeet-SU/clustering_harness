@@ -90,8 +90,20 @@ retries) and `BackendConfigError` for problems retrying cannot fix (invalid key,
 missing region). `LLM` logs every failure with key-like strings redacted. A configuration error, or
 `max_consecutive_failures` (default 8) failed requests in a row, raises `ModelUnavailableError` and stops the
 run. A request that failed in transport returns `{"_error": ..., "_transport_error": ...}` to the algorithm and
-is **never cached**, so a rerun asks again. Only real model answers, including answers that break the JSON
-contract, are cached.
+is **never cached**, so a rerun asks again. Answers that still break the JSON contract after the repair request
+are not cached either, unless `cache_contract_failures=True` (the exact-reproduction replay sets it, because the
+original run cached them). Once a model is unusable, every later request to it raises `ModelUnavailableError`
+without being sent, and `run_parallel` drops jobs that have not started. Before the slow stages, `Pipeline.run`
+sends one small test request per model (`LLM.preflight()`; turn it off with `Pipeline(..., preflight=False)`).
+
+Cache keys include `LLM.settings`: the `reasoning` flag plus each backend's `cache_settings()` (options that
+change answers without changing the request, non-default values only). A custom backend may define
+`cache_settings()` too. `legacy_cache_keys=True` leaves them out, to reuse caches written before 0.2.
+
+A backend that reports 0 input and 0 output tokens is charged an estimate (about 4 characters per token) when
+its model has a price, so budgets still hold. `timeout` and `max_retries` are spec options for `openai`,
+`openai_compatible`, `azure_openai`, `gemini`, `anthropic` and `bedrock`. Bedrock's "invalid model identifier"
+error is a configuration error.
 
 Bedrock does not send `temperature` to Claude models, which reject non-default sampling. Other model families
 get it. Override with `send_temperature: true/false`.

@@ -14,5 +14,5 @@ from .data import Dataset, JunkRule, TextTemplate
 from .pipeline import ClusteringResult, Pipeline
 from .prompts import PromptSet
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = ["Dataset", "JunkRule", "TextTemplate", "PipelineConfig", "Pipeline", "ClusteringResult", "PromptSet", "__version__"]

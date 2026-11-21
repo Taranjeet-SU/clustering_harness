@@ -131,6 +131,14 @@ class BedrockBackend:
         self._lock = threading.Lock()
         self.auth_mode = None   # set when the client is built: provider | keys | bearer | assume_role | default_chain
 
+    def cache_settings(self) -> dict:
+        out = {}
+        if self.additional_model_request_fields:
+            out["additional_model_request_fields"] = self.additional_model_request_fields
+        if self.max_tokens_cap != 8192:
+            out["max_tokens_cap"] = self.max_tokens_cap
+        return out
+
     # ------------------------------------------------------------------ credentials
     def _resolve(self) -> dict:
         creds = dict(self._static)
@@ -246,7 +254,9 @@ class BedrockBackend:
                 code = e.response.get("Error", {}).get("Code", "")
                 if attempt == 0 and code in _EXPIRED and (self._provider is not None or "role_arn" in self._static):
                     continue
-                err = BackendConfigError if code in _FATAL else BackendError
+                bad_model = code == "ValidationException" and any(
+                    t in str(e).lower() for t in ("model identifier", "model id", "on-demand throughput", "inference profile"))
+                err = BackendConfigError if (code in _FATAL or bad_model) else BackendError
                 raise err(f"bedrock {self.model}: {code}: {str(e)[:300]}") from e
             except (NoCredentialsError, PartialCredentialsError) as e:
                 raise BackendConfigError(f"bedrock: {e} (no AWS credentials found: set credentials, a profile, a role or a "

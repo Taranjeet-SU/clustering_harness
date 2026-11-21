@@ -12,7 +12,9 @@ re-execution reproduced all of the reference outputs byte for byte, which valida
 
 The trace was then loaded into the package's response cache, and the package was run on the same records
 with an `OfflineBackend` for both slots: any request that was not byte-identical to a reference request would
-be a cache miss and abort the run with a diff. The embedding vectors of the reference run were supplied as
+be a cache miss and abort the run with a diff. The original run cached answers that broke the JSON contract and
+used cache keys without model settings, so the replay sets `cache_contract_failures=True` and
+`legacy_cache_keys=True` (since 0.2 both are off by default). The embedding vectors of the reference run were supplied as
 precomputed vectors; everything else (bank, UMAP, HDBSCAN, Leiden, k-means, splits, label embeddings,
 geometry) was recomputed by the package.
 

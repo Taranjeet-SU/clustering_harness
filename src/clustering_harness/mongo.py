@@ -89,7 +89,10 @@ def load_mongo_frame(collection: str | list[str], database: str | None = None, u
     own_client = client is None
     if own_client:
         from pymongo import MongoClient
-        uri = uri or os.environ.get(uri_env) or "mongodb://localhost:27017"
+        uri = uri or os.environ.get(uri_env)
+        if not uri:
+            raise ValueError(f"no MongoDB connection string: set the {uri_env} environment variable (or pass uri=..., "
+                             f"e.g. mongodb://localhost:27017)")
         client = MongoClient(uri, **(client_kwargs or {}))
     try:
         db = client[database] if database else client.get_default_database()
@@ -102,6 +105,20 @@ def load_mongo_frame(collection: str | list[str], database: str | None = None, u
         proj = projection
         if isinstance(proj, list):
             proj = {f: 1 for f in proj}
+        try:
+            existing = set(db.list_collection_names())
+        except Exception:  # noqa: BLE001 - the user may lack listCollections; then reading is the only check
+            existing = None
+        if existing is not None:
+            missing = [c for c in colls if c not in existing]
+            if missing:
+                import difflib
+                hints = {c: difflib.get_close_matches(c, existing, 1) for c in missing}
+                hint = "; ".join(f"{c!r} (did you mean {h[0]!r}?)" if h else repr(c) for c, h in hints.items())
+                raise ValueError(f"collection(s) not found in database {db.name!r}: {hint}. "
+                                 f"Collections there: {sorted(existing)[:20]}")
+        fields = {f: 0 for f in text_fields + [x for x in (title_field, label_field) if x]}
+        seen_keys: set = set()
         rows = []
         for name in colls:
             left = None if limit is None else limit - len(rows)
@@ -123,6 +140,11 @@ def load_mongo_frame(collection: str | list[str], database: str | None = None, u
                 rid = get_path(d, id_field)
                 if rid is None:
                     raise ValueError(f"document in {name!r} has no {id_field!r} field")
+                if len(seen_keys) < 200:
+                    seen_keys.update(d.keys())
+                for f in fields:
+                    if get_path(d, f) is not None:
+                        fields[f] += 1
                 parts = [_as_text(get_path(d, f)).strip() for f in text_fields]
                 row = {"id": f"{name}:{rid}" if id_with_collection else str(rid),
                        "text": text_joiner.join(p for p in parts if p)}
@@ -142,6 +164,15 @@ def load_mongo_frame(collection: str | list[str], database: str | None = None, u
             client.close()
     if not rows:
         log.warning("mongo: no documents matched in %s (collections %s)", database or "default database", colls)
+    absent = [f for f, n in fields.items() if n == 0] if rows else []
+    if absent:
+        import difflib
+        hint = "; ".join(f"{f!r}" + (f" (did you mean {m[0]!r}?)" if (m := difflib.get_close_matches(f.split('.')[0], seen_keys, 1))
+                                     else "") for f in absent)
+        raise ValueError(f"field(s) not found in any of the {len(rows)} documents read: {hint}. "
+                         f"Top-level fields seen: {sorted(seen_keys)[:30]}")
+    if rows and not any(r["text"] for r in rows):
+        raise ValueError(f"every document has an empty text (text_field={text_fields})")
     df = pd.DataFrame(rows, columns=None if rows else ["id", "text"])
     if df["id"].duplicated().any():
         dup = df.loc[df["id"].duplicated(), "id"].head(5).tolist()

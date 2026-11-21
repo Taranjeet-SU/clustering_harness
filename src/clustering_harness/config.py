@@ -90,6 +90,9 @@ class GateConfig(_M):
     max_tokens: int = 300
     max_tokens_reasoning: int = 900
     retry_tokens_reasoning: int = 2400
+    #: a judge that gives every calibration group the same score cannot separate good groups from bad ones; the
+    #: run stops unless this is set (only useful with stub models in tests)
+    allow_constant_judge: bool = False
 
 
 class CascadeConfig(_M):

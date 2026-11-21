@@ -69,6 +69,18 @@ def _data_fingerprint(ds: Dataset) -> str:
         h.update(json.dumps([rid, t, x]).encode())
     return h.hexdigest()[:20]
 
+
+def _vectors_fingerprint(vectors) -> str | None:
+    """Hash of precomputed vectors (shape, dtype and values), so a rerun with changed vectors is noticed."""
+    if vectors is None:
+        return None
+    import hashlib
+    v = np.ascontiguousarray(np.asarray(vectors, dtype=np.float32))
+    h = hashlib.sha256(json.dumps(list(v.shape)).encode())
+    h.update(v.tobytes())
+    return h.hexdigest()[:20]
+
+
 def _environment() -> dict:
     """Versions that can change embeddings or clusterings numerically."""
     import platform
@@ -87,7 +99,8 @@ def _embedder_settings(e) -> dict | None:
     e = getattr(e, "inner", e)
     if e is None:
         return None
-    keys = ("model", "device", "half", "store_float16", "pooling", "max_length", "batch_size")
+    # only options that change the vectors (the name already records fp16 on GPU); device/batch size do not
+    keys = ("model", "store_float16", "pooling", "max_length", "prefix")
     return {"class": type(e).__name__, **{k: getattr(e, k) for k in keys if hasattr(e, k)}}
 
 class Pipeline:
@@ -95,7 +108,8 @@ class Pipeline:
 
     def __init__(self, config: PipelineConfig | None = None, llms: dict | None = None, embedder: Embedder | None = None,
                  label_embedder: Embedder | None = None, workdir: str | Path = "runs/default", prompts: PromptSet | None = None,
-                 vectors: np.ndarray | None = None, progress: Callable[[str, dict], None] | None = None):
+                 vectors: np.ndarray | None = None, progress: Callable[[str, dict], None] | None = None,
+                 preflight: bool = True):
         self.cfg = config or PipelineConfig()
         self.llms = llms or {}
         self.embedder = embedder
@@ -104,6 +118,7 @@ class Pipeline:
         self.prompts = prompts
         self.vectors = vectors
         self.progress = progress
+        self.preflight = preflight
         missing = {"a", "b"} - set(self.llms)
         if missing:
             raise ValueError(f"llms must define slots 'a' and 'b' (missing {sorted(missing)})")
@@ -112,12 +127,27 @@ class Pipeline:
                 m.cache = ResponseCache(self.workdir / "cache" / "llm.sqlite")
 
     # ------------------------------------------------------------------ helpers
+    def _prompts(self) -> PromptSet:
+        if self.prompts is None:
+            self.prompts = PromptSet.load(self.cfg.prompts, domain=self.cfg.domain or None)
+        return self.prompts
+
+    def _preflight(self) -> None:
+        """One tiny request per model before the slow stages, so a wrong key, model name or URL fails in seconds."""
+        from .llm.backends import OfflineBackend
+        seen = set()
+        for m in self.llms.values():
+            if id(m) in seen or isinstance(m.backend, OfflineBackend):
+                continue
+            seen.add(id(m))
+            m.preflight()
+
     def _embed(self, ds: Dataset) -> np.ndarray:
         p = self.workdir / "cache" / "embeddings.npy"
         ids_p = self.workdir / "cache" / "embeddings.ids.json"
-        if p.exists() and ids_p.exists() and json.loads(ids_p.read_text()) == ds.ids:
+        if self.vectors is None and p.exists() and ids_p.exists() and json.loads(ids_p.read_text()) == ds.ids:
             return np.load(p)
-        if self.vectors is not None:
+        if self.vectors is not None:   # always taken from the caller (cheap), never from a possibly stale cache
             X = l2_normalize(self.vectors)
         else:
             if self.embedder is None:
@@ -167,13 +197,19 @@ class Pipeline:
                     "models": {k: m.model_id for k, m in self.llms.items()},
                     "embedder": getattr(self.embedder, "name", "precomputed" if self.vectors is not None else None),
                     "label_embedder": getattr(self.label_embedder, "name", None),
-                    "embedder_settings": _embedder_settings(self.embedder),
+                    "embedder_options": _embedder_settings(self.embedder),
+                    "label_embedder_options": _embedder_settings(self.label_embedder),
+                    "model_settings": {k: m.settings for k, m in self.llms.items()},
+                    "prompts_fingerprint": self._prompts().fingerprint(),
+                    "vectors_fingerprint": _vectors_fingerprint(self.vectors),
                     "environment": _environment()}
         old = wd / "manifest.json"
         if old.exists():
             prev = json.loads(old.read_text())
             manifest["first_run_environment"] = prev.get("first_run_environment") or prev.get("environment")
-            changed = [k for k in ("records", "data_fingerprint", "config_fingerprint", "models", "embedder", "label_embedder")
+            changed = [k for k in ("records", "data_fingerprint", "config_fingerprint", "models", "model_settings",
+                                   "prompts_fingerprint", "embedder", "embedder_options", "label_embedder",
+                                   "label_embedder_options", "vectors_fingerprint")
                        if k in prev and prev[k] != manifest[k]]
             if changed:
                 raise ValueError(f"{wd} holds a run with a different {', '.join(changed)}; its cached stages would be "
@@ -181,9 +217,11 @@ class Pipeline:
         manifest["first_run_environment"] = manifest.get("first_run_environment") or manifest["environment"]
         write_json(manifest, old)
         self.cfg.to_file(wd / "config.yaml")
+        if self.preflight and until not in ("embed", "bank") and not (wd / "output" / "assignments.csv").exists():
+            self._preflight()
         X = self._embed(ds)
         ctx = RunContext(ds=ds, cfg=self.cfg, llms=self.llms, workdir=wd, X=X, label_embedder=self.label_embedder,
-                         prompts=self.prompts, progress_cb=self.progress)
+                         prompts=self._prompts(), progress_cb=self.progress)
         if until == "embed":
             return None
         from .algorithms.cascade import Cascade

@@ -66,6 +66,12 @@ class PromptSet:
     def __getitem__(self, key: str) -> str:
         return self.templates[key]
 
+    def fingerprint(self) -> str:
+        """Hash of the rendered templates (prompt file edits and domain values both change it)."""
+        import hashlib
+        import json
+        return hashlib.sha256(json.dumps(self.templates, sort_keys=True).encode()).hexdigest()[:16]
+
     # ------------------------------------------------------------------ loading
     @classmethod
     def from_yaml(cls, path: str | Path, domain: dict | None = None, overrides: dict | None = None) -> "PromptSet":

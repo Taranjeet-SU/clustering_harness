@@ -60,9 +60,61 @@ label_embedder: {{backend: st, model: BAAI/bge-large-en-v1.5, device: cpu}}
 """
 
 
+SPEC_KEYS = ("workdir", "data", "pipeline", "models", "embedder", "label_embedder", "ledger", "embedding_cache")
+DATA_KEYS = {"path": ("path", "id_col", "text_col", "title_col", "label_col", "limit", "seed"),
+             "dataset": ("dataset", "split", "limit", "seed", "options"),
+             "mongo": ("mongo", "limit", "seed")}
+PRESETS = ("small", "reference", "auto")
+
+
+def _unknown(keys, allowed, where: str) -> None:
+    import difflib
+    bad = [k for k in keys if k not in allowed]
+    if bad:
+        hint = "; ".join(f"{k!r}" + (f" (did you mean {m[0]!r}?)" if (m := difflib.get_close_matches(str(k), allowed, 1)) else "")
+                         for k in bad)
+        raise ValueError(f"unknown {where} key(s): {hint}. Allowed: {', '.join(allowed)}")
+
+
+def _resolve_input(p, base: Path | None) -> str:
+    """An input file path as written; if it does not exist relative to the current folder, relative to the spec."""
+    q = Path(str(p)).expanduser()
+    if q.is_absolute() or q.exists() or base is None or not (base / q).exists():
+        return str(q)
+    return str(base / q)
+
+
 def load_spec(path: str | Path) -> dict:
-    spec = yaml.safe_load(Path(path).read_text())
-    spec.setdefault("workdir", f"runs/{Path(path).stem}")
+    """Read and check a run spec. Input files (``data.path``, a prompt YAML) are looked up in the current folder
+    first, then next to the spec; outputs (``workdir``, ``ledger``) are relative to the current folder."""
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"run spec not found: {path}")
+    spec = yaml.safe_load(path.read_text())
+    if not isinstance(spec, dict):
+        raise ValueError(f"{path}: a run spec must be a YAML mapping (see `clustering-harness init`)")
+    _unknown(spec, SPEC_KEYS, "run spec")
+    for k in ("data", "models"):
+        if k not in spec:
+            raise ValueError(f"{path}: the run spec needs a `{k}` section (see `clustering-harness init`)")
+    base = path.resolve().parent
+    d = spec["data"]
+    src = [k for k in DATA_KEYS if k in d]
+    if len(src) != 1:
+        raise ValueError(f"data: give exactly one of `path`, `dataset` or `mongo` (found: {src or 'none'})")
+    _unknown(d, DATA_KEYS[src[0]], "data")
+    if "path" in d:
+        d["path"] = _resolve_input(d["path"], base)
+    p = spec.get("pipeline") or {}
+    if p.get("preset", "auto") not in PRESETS:
+        raise ValueError(f"pipeline.preset {p['preset']!r} is not one of {', '.join(PRESETS)}")
+    pr = str(p.get("prompts", ""))
+    if pr.endswith((".yaml", ".yml")):
+        p["prompts"] = _resolve_input(pr, base)
+    missing = {"a", "b"} - set(spec["models"] or {})
+    if missing:
+        raise ValueError(f"models: slots 'a' and 'b' are both required (missing {sorted(missing)})")
+    spec.setdefault("workdir", f"runs/{path.stem}")
     return spec
 
 
@@ -73,6 +125,10 @@ def load_data(d: dict):
         coll = m.pop("collection", None) or m.pop("collections", None)
         if not coll:
             raise ValueError("data.mongo needs `collection` (a name) or `collections` (a list of names)")
+        import inspect
+        from .mongo import load_mongo_frame
+        allowed = [k for k in inspect.signature(load_mongo_frame).parameters if k not in ("collection", "client")] + ["name"]
+        _unknown(m, allowed, "data.mongo")
         ds = Dataset.from_mongo(coll, **m)
         if d.get("limit"):
             ds = ds.sample(int(d["limit"]), seed=d.get("seed", 0))
@@ -122,6 +178,8 @@ def _parse_baseline(s: str):
     name, _, args = s.partition(":")
     kw = {}
     for part in filter(None, args.split(",")):
+        if part.count("=") != 1:
+            raise ValueError(f"baseline option {part!r} in {s!r} must look like key=value")
         k, v = part.split("=")
         try:
             kw[k] = json.loads(v)
@@ -133,6 +191,21 @@ def _parse_baseline(s: str):
 
 
 def main(argv=None) -> int:
+    verbose = "-v" in (argv if argv is not None else sys.argv[1:]) or "--verbose" in (argv if argv is not None else sys.argv[1:])
+    try:
+        return _main(argv)
+    except KeyboardInterrupt:
+        print("interrupted; rerun the same command to resume from the caches", file=sys.stderr)
+        return 130
+    except (ValueError, RuntimeError, FileNotFoundError, KeyError, TypeError, ImportError, OSError, yaml.YAMLError) as e:
+        if verbose:
+            raise
+        msg = str(e) if not isinstance(e, KeyError) else f"missing key {e}"
+        print(f"error: {msg}\n(rerun with -v for the full traceback)", file=sys.stderr)
+        return 2
+
+
+def _main(argv=None) -> int:
     from .baselines import list_baselines
     ap = argparse.ArgumentParser("clustering-harness", description="LLM-assisted clustering of short texts. "
                                  "A run is described by a YAML spec (see `clustering-harness init`).")
@@ -221,8 +294,16 @@ def main(argv=None) -> int:
         print(json.dumps(out["summary"]["agreement"], indent=1, default=float))
         return 0
     if a.cmd == "compare":
-        from .baselines import run_baseline
+        from .baselines import BASELINES, run_baseline
         from .multirun import compare_partitions
+        import inspect
+        for b in a.baselines:     # check names and options before the (long) pipeline run
+            name, kw = _parse_baseline(b)
+            if name not in BASELINES:
+                raise ValueError(f"unknown baseline {name!r}; available: {', '.join(list_baselines())}")
+            sig = inspect.signature(BASELINES[name]).parameters
+            if not any(p.kind is p.VAR_KEYWORD for p in sig.values()):
+                _unknown(kw, [k for k in sig if k not in ("X", "random_state")], f"baseline {name}")
         pipe, ds, _ = build_from_spec(spec)
         res = pipe.run(ds)
         X = np.load(Path(pipe.workdir) / "cache" / "embeddings.npy")

@@ -102,3 +102,23 @@ def test_run_spec_mongo_source_reads_uri_from_env(db, monkeypatch):
     ds = load_data({"mongo": {"uri_env": "MY_MONGO", "database": db, "collections": ["tickets_a"], "query": {"status": "closed"},
                               "text_field": ["subject", "body.text"]}})
     assert sorted(ds.ids) == ["1", "3"] and ds.name == "tickets_a"
+
+
+def test_unset_uri_variable_is_an_error(monkeypatch):
+    monkeypatch.delenv("NO_SUCH_MONGO_URI", raising=False)
+    with pytest.raises(ValueError, match="set the NO_SUCH_MONGO_URI environment variable"):
+        Dataset.from_mongo("tickets", uri_env="NO_SUCH_MONGO_URI", database="x")
+
+
+@needs_server
+def test_missing_collection_is_an_error(db):
+    with pytest.raises(ValueError, match="'tickets_c'"):
+        Dataset.from_mongo(["tickets_a", "tickets_c"], uri=URI, database=db, text_field="subject")
+
+
+@needs_server
+def test_misspelled_field_is_an_error(db):
+    with pytest.raises(ValueError, match="'subjct' \\(did you mean 'subject'\\?\\)"):
+        Dataset.from_mongo("tickets_a", uri=URI, database=db, text_field=["subjct"])
+    with pytest.raises(ValueError, match="'titel'"):
+        Dataset.from_mongo("tickets_a", uri=URI, database=db, text_field="subject", title_field="titel")

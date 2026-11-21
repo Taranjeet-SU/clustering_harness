@@ -30,7 +30,7 @@ check, split, name and fill them, and keeps a record of every decision so you ca
 ## Contents
 
 1. [Install](#1-install)
-2. [Your first run (10 minutes)](#2-your-first-run-10-minutes)
+2. [Your first run (about 15 minutes)](#2-your-first-run-about-15-minutes)
 3. [Key ideas in plain words](#3-key-ideas-in-plain-words)
 4. [Loading your data (CSV, pandas, MongoDB, ...)](#4-loading-your-data)
 5. [Choosing models (Ollama, OpenAI, Azure, Gemini, Anthropic, Bedrock, your own)](#5-choosing-models)
@@ -75,10 +75,11 @@ To install less, pick extras: `pip install -e ".[embeddings,openai,datasets]"`.
 
 Without cloning: `pip install "clustering-harness[all] @ git+https://github.com/Taranjeet-SU/clustering_harness.git"`.
 
-## 2. Your first run (10 minutes)
+## 2. Your first run (about 15 minutes)
 
 The repository ships a ready-made run on a public dataset. All you need is an OpenAI API key; the run costs
-about $0.50 and takes about 13 minutes on a laptop CPU.
+about $0.50 and takes 13–15 minutes on a laptop CPU, most of it embedding. Before the slow part starts, the run
+sends one tiny test request to each model, so a wrong key, model name or server address fails within seconds.
 
 ```bash
 export OPENAI_API_KEY=sk-...
@@ -96,7 +97,8 @@ clustering-harness compare examples/banking77.yaml --baselines kmeans:k=77 agglo
 
 This reruns nothing: every model answer is cached, so it only adds the baselines. It writes
 `runs/banking77/output/comparison.csv`, with one row per partition. `pipeline_clusters` is the pipeline row of
-the Validation table. Add `--judge --judge-max-clusters 40` for the LLM-judge column (about $0.10).
+the Validation table. Add `--judge --judge-max-clusters 40` for the LLM-judge column (about $0.15 with `gpt-4o-mini`). Baseline names
+and options are checked before anything runs.
 
 **Now with your own data.** Create a starter spec, edit the marked lines and run it:
 
@@ -126,6 +128,10 @@ models:                               # two LLMs, "a" and "b" (sections 3 and 5)
 embedder: {backend: hf, model: Alibaba-NLP/gte-large-en-v1.5}
 label_embedder: {backend: st, model: BAAI/bge-large-en-v1.5}
 ```
+
+Paths: input files (`data.path`, a prompt YAML) are looked up in the current folder first, then next to the
+spec. Outputs (`workdir`, `ledger`) are relative to the folder you run the command from. Unknown keys and
+misspelled presets are errors, with the closest valid name suggested.
 
 The same in Python:
 
@@ -298,6 +304,8 @@ class GatewayBackend:
         self.model, self.model_id = model, f"gateway:{model}"
     def complete(self, request):              # request.messages, request.max_tokens, request.json_mode, ...
         text = my_gateway.chat(self.model, request.messages, max_tokens=request.max_tokens)
+        # report real token counts when the gateway returns them; with 0/0 the spend is estimated from the
+        # text length (about 4 characters per token) so that budgets still hold
         return ChatResult(text=text, input_tokens=0, output_tokens=0)
 
 register_backend("gateway", lambda opts: GatewayBackend(opts.pop("model"), opts.pop("timeout", 60)))
@@ -308,10 +316,19 @@ An import path only works if Python can import the module. The command line adds
 folder of the run spec, so a `my_backend.py` next to `run.yaml` just works. Anything else must be installed
 (`pip install -e path/to/your/package`) or on `PYTHONPATH`.
 
-**When a model fails.** Every failed request is logged, and a failed request is never cached: a rerun asks
-again. A configuration problem (invalid key, no permission, unknown model, missing region) stops the run at
-once with the provider's message. So do 8 failed requests in a row (`max_consecutive_failures`), so a
-broken server cannot burn through the dataset.
+**When a model fails.** Every failed request is logged, and only good answers are cached: a request that
+failed, or an answer that was still not valid JSON after one repair request, is asked again on a rerun. (Set
+`cache_contract_failures: true` on a model to cache those answers too; the exact-reproduction replay in
+docs/validation.md does.) A configuration problem (invalid key, no permission, unknown model, missing region)
+stops the run with the provider's message, and so do 8 failed requests in a row (`max_consecutive_failures`).
+Once a model is marked unusable, requests already queued for it fail immediately instead of being sent, and
+unstarted jobs are dropped. Requests already in flight finish first, so a few may still go out.
+`timeout` and `max_retries` can be set per model (`openai`/`anthropic`/`bedrock`) to decide how long a dead
+server is retried.
+
+**What the cache key covers.** The model id, the messages, `max_tokens`, seed, JSON mode, temperature, and
+model settings that change answers without changing the request (`reasoning`, Ollama `think`/`num_ctx`,
+Anthropic `thinking`/`effort`, Bedrock extra request fields). Changing any of them asks the model again.
 
 **Which models?** Small and mid-size models work: the validation runs used a 27B Qwen model with
 `gpt-oss:20b` locally, and `gpt-4o-mini`. Two *different* models in `a` and `b` make the two-judge checks
@@ -330,8 +347,10 @@ inflated (section 13).
 
 The `embedder` clusters the records; the `label_embedder` compares cluster names and is used in the final
 merge. Add `device: cuda` (or `device: auto`) to use a GPU. Embeddings are cached in
-`~/.cache/clustering_harness/embeddings` (change it with `embedding_cache:` in the spec). The cache key
-includes the model, pooling, length and precision.
+`~/.cache/clustering_harness/embeddings`. Change the folder with `embedding_cache:` in the spec, or for every
+run with the `CLUSTERING_HARNESS_CACHE` environment variable (embeddings then go to
+`$CLUSTERING_HARNESS_CACHE/embeddings`). The cache key includes the model, pooling, length, precision and the
+exact texts.
 
 ## 7. Describing your domain
 
@@ -378,7 +397,7 @@ Everything lands in `<workdir>/output/`:
 |---|---|
 | `report_lines.csv` | the short list: line name, rule, number of records, member clusters, judge score |
 | `clusters.csv` | per cluster: name, inclusion and exclusion rule, size, geometry (how tight and separate it is), two-model quality scores (1–5), example and suspicious record ids, `quality_status` (`MODEL_REVIEW_PASSED` or `REVIEW_RECOMMENDED`) |
-| `assignments.csv` | per record: `status` (`cluster` / `unassigned` / `junk`), cluster and line, `placement` (which stage placed it) and `reason` (the model's reason) |
+| `assignments.csv` | per record: `status` (`cluster` / `unassigned` / `junk`), cluster and line, `placement` (which stage placed it) and `reason`: why a record was *not* clustered (junk or not placed); it is empty for clustered records |
 | `summary.json` | coverage, mean scores, model usage |
 
 `<workdir>/manifest.json` records the dataset, the configuration fingerprint, the models, the embedder
@@ -436,15 +455,20 @@ table = compare_partitions({"pipeline": result.labels(), "kmeans": run_baseline(
 | symptom | fix |
 |---|---|
 | `CUDA out of memory` while embedding | the embedder uses the CPU unless you set `device: cuda`; remove it, or free the GPU |
-| `... holds a run with a different ...` | a workdir belongs to one dataset, configuration, model pair and embedder (all checked); use a new `workdir` after changing any of them |
+| `... holds a run with a different ...` | a workdir belongs to one dataset, configuration, prompt set (file contents and domain), model pair with its settings, and embedder with its options (all checked); use a new `workdir` after changing any of them |
 | `ModelUnavailableError: ... cannot be used` | the provider rejected the settings (key, permission, model name, region); fix them and rerun. Nothing failed was cached |
 | `ModelUnavailableError: ... requests in a row failed` | the server is down, unreachable or rate-limiting; the log shows each error. Rerun when it's back |
 | `ModuleNotFoundError` for a `module:Class` backend | put the module next to the run spec, install your package, or add it to `PYTHONPATH` |
-| warning `judge 'a' gave every calibration group the same score` | that model is not really judging (a stub, a broken prompt, or a model too weak for the task); use another model |
+| `judge 'a' ... gave all N calibration answers the same score` | that model is not really judging (a stub, a broken prompt, or a model too weak for the task); use another model. The run stops here unless `pipeline.gate.allow_constant_judge: true` |
+| `... did not answer a test request` | the test request sent before embedding failed; check the model name, key, URL and network |
+| `unknown run spec key(s)` / `unknown data key(s)` / `pipeline.preset ...` | a typo in the spec; the message suggests the closest valid name |
+| `field(s) not found in any of the N documents` | a MongoDB field name is wrong; the message lists the fields it saw |
+| `no MongoDB connection string` | set `MONGODB_URI` (or the variable named by `uri_env`), or give `uri:` |
 | `BudgetExceeded` | raise `budget_usd` and rerun; finished work is cached |
 | warning `budget_usd ... cannot be enforced` | set `price_in` / `price_out` for that model |
 | local models are slow | lower `concurrency` to what your GPU serves, or use a smaller model for one slot |
-| `dataset ... has no records` | check the file path, the Mongo query and the collection names |
+| `dataset ... has no records` | check the file path and the Mongo query (missing collections are reported by name) |
+| a plain `error: ...` line | the command line prints one line for expected errors; add `-v` to see the full traceback |
 | Bedrock `no region` | set `region:` (or `AWS_REGION`) |
 
 ## Validation

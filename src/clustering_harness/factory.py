@@ -31,6 +31,7 @@ def _openai_like(kind):
             api_key_provider=s.pop("api_key_provider", None), azure_endpoint=s.pop("azure_endpoint", None),
             api_version=s.pop("api_version", None), default_headers=s.pop("default_headers", None),
             supports_json_mode=s.pop("json_mode", True), supports_seed=s.pop("seed", True), timeout=s.pop("timeout", 120),
+            max_retries=s.pop("max_retries", 5),
             token_param=s.pop("token_param", "max_completion_tokens" if kind in ("openai", "azure_openai") else "max_tokens"))
     return make
 
@@ -39,7 +40,7 @@ def _anthropic(s):
     return AnthropicBackend(s.pop("model", "claude-haiku-5-5"), effort=s.pop("effort", "low"), thinking=s.pop("thinking", None),
                             max_tokens_cap=s.pop("max_tokens_cap", 4000), api_key_provider=s.pop("api_key_provider", None),
                             api_key_env=s.pop("api_key_env", "ANTHROPIC_API_KEY"), base_url=s.pop("base_url", None),
-                            timeout=s.pop("timeout", 120))
+                            timeout=s.pop("timeout", 120), max_retries=s.pop("max_retries", 8))
 
 
 def _bedrock(s):
@@ -108,15 +109,22 @@ def build_backend(spec: dict):
 
 def build_llm(spec: dict, cache: ResponseCache | None = None, ledger: Ledger | None = None, name: str | None = None) -> LLM:
     """``spec`` keys: ``backend`` (see :func:`build_backend`), ``model``, backend options, and wrapper options
-    (``reasoning``, ``concurrency``, ``budget_usd``, ``price_in``, ``price_out``)."""
+    (``reasoning``, ``concurrency``, ``budget_usd``, ``price_in``, ``price_out``, ``cache_contract_failures``,
+    ``legacy_cache_keys``, ``max_consecutive_failures``)."""
     s = dict(spec)
     reasoning = bool(s.pop("reasoning", False))
     concurrency = int(s.pop("concurrency", 2))
     budget = s.pop("budget_usd", None)
     pin, pout = s.pop("price_in", None), s.pop("price_out", None)
+    if (pin is None) != (pout is None):
+        raise ValueError("set both price_in and price_out (USD per million tokens), or neither")
+    extra = {k: s.pop(k) for k in ("cache_contract_failures", "legacy_cache_keys", "max_consecutive_failures") if k in s}
+    if "backend" not in s:
+        raise ValueError(f"model {name or ''} needs `backend:` (one of {', '.join(backend_kinds())}, or 'package.module:Factory')")
     be = build_backend(s)
-    price = Price(pin, pout) if pin is not None and pout is not None else None
-    return LLM(be, name=name, cache=cache, max_concurrency=concurrency, reasoning=reasoning, budget_usd=budget, ledger=ledger, price=price)
+    price = Price(pin, pout) if pin is not None else None
+    return LLM(be, name=name, cache=cache, max_concurrency=concurrency, reasoning=reasoning, budget_usd=budget, ledger=ledger,
+               price=price, **extra)
 
 
 def build_embedder(spec: dict | None, cache_dir: str | Path | None = None):

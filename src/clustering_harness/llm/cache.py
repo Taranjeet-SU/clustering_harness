@@ -17,8 +17,14 @@ from pathlib import Path
 __all__ = ["ResponseCache", "request_key"]
 
 
-def request_key(model_id: str, messages: list, max_tokens: int, seed: int, as_json: bool, temperature: float) -> str:
-    return hashlib.sha1(json.dumps([model_id, messages, max_tokens, seed, as_json, temperature], sort_keys=True).encode()).hexdigest()
+def request_key(model_id: str, messages: list, max_tokens: int, seed: int, as_json: bool, temperature: float,
+                settings: dict | None = None) -> str:
+    """Cache key of one request. ``settings`` holds model options that change answers without changing the
+    request (reasoning flag, thinking/effort, extra provider fields); empty settings give the original key."""
+    parts = [model_id, messages, max_tokens, seed, as_json, temperature]
+    if settings:
+        parts.append(settings)
+    return hashlib.sha1(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()
 
 
 class ResponseCache:

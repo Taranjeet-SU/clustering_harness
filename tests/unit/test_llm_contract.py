@@ -113,8 +113,17 @@ def test_cache_key_covers_every_request_field():
     assert request_key(**base) == k0          # deterministic
 
 
-def test_contract_failures_are_cached_too(tmp_path):
+def test_contract_failures_are_not_cached_by_default(tmp_path):
     llm, s = make(["garbage"], cache=ResponseCache(tmp_path / "c.sqlite"))
+    o1 = llm.call("st", MSG)
+    o2 = llm.call("st", MSG)
+    assert "_error" in o1 and "_error" in o2 and len(s.requests) == 4  # asked again: 1 call + 1 repair each time
+    assert llm.cache.error_count() == 0 and llm.stats["contract_failures"] == 2
+
+
+def test_contract_failures_cached_when_asked(tmp_path):
+    llm, s = make(["garbage"], cache=ResponseCache(tmp_path / "c.sqlite"))
+    llm.cache_contract_failures = True
     o1 = llm.call("st", MSG)
     o2 = llm.call("st", MSG)
     assert "_error" in o1 and o1 == o2 and len(s.requests) == 2      # 1 call + 1 repair, then cached

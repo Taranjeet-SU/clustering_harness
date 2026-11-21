@@ -174,3 +174,56 @@ def test_unusable_model_stops_the_run_and_caches_nothing(run, tmp_path):
         Pipeline(config(), llms=llms, label_embedder=HashEmbedder(), vectors=X, workdir=wd).run(ds)
     from clustering_harness.llm import ResponseCache
     assert ResponseCache(wd / "cache" / "llm.sqlite").error_count() == 0
+
+
+def test_workdir_refuses_edited_prompts(run):
+    ds, X, wd, *_ = run
+    from clustering_harness.prompts import PromptSet
+    llms, _ = fake_llms()
+    p = PromptSet.load("default", domain=config().domain or None)
+    p.templates["gate_system"] += "\nBe strict."
+    with pytest.raises(ValueError, match="prompts_fingerprint"):
+        Pipeline(config(), llms=llms, label_embedder=HashEmbedder(), vectors=X, workdir=wd, prompts=p).run(ds)
+
+
+def test_workdir_refuses_changed_reasoning_flag(run):
+    ds, X, wd, *_ = run
+    llms, _ = fake_llms(reasoning_b=True)
+    with pytest.raises(ValueError, match="model_settings"):
+        Pipeline(config(), llms=llms, label_embedder=HashEmbedder(), vectors=X, workdir=wd).run(ds)
+
+
+def test_bad_model_fails_before_embedding(run, tmp_path):
+    ds, X, *_ = run
+    from clustering_harness.llm import LLM, BackendConfigError, CallableBackend, ModelUnavailableError
+
+    class CountingEmbedder:
+        name = "counting"
+        calls = 0
+
+        def encode(self, texts):
+            CountingEmbedder.calls += 1
+            return X
+
+    def bad(req):
+        raise BackendConfigError("404 model not found")
+
+    llms, _ = fake_llms()
+    llms["b"] = LLM(CallableBackend(bad, "fake:b"), name="b")
+    with pytest.raises(ModelUnavailableError, match="model not found"):
+        Pipeline(config(), llms=llms, embedder=CountingEmbedder(), label_embedder=HashEmbedder(),
+                 workdir=tmp_path / "w").run(ds)
+    assert CountingEmbedder.calls == 0                           # the test request failed first
+
+
+def test_dead_server_fails_the_test_request(run, tmp_path):
+    ds, X, *_ = run
+    from clustering_harness.llm import LLM, BackendError, CallableBackend, ModelUnavailableError
+
+    def down(req):
+        raise BackendError("connection refused")
+
+    llms, _ = fake_llms()
+    llms["a"] = LLM(CallableBackend(down, "fake:a"), name="a")
+    with pytest.raises(ModelUnavailableError, match="did not answer a test request: connection refused"):
+        Pipeline(config(), llms=llms, label_embedder=HashEmbedder(), vectors=X, workdir=tmp_path / "w").run(ds)

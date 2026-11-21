@@ -77,11 +77,12 @@ class Gate:
             b[j] = {"mu": float(np.mean(v)), "sd": float(np.std(v)) or 1.0, "n": len(v)}
             if len(v) >= 5 and float(np.std(v)) == 0.0:
                 b[j]["constant"] = True
-                log.warning("gate calibration: judge %r gave every calibration group the same score (%s); its scores "
-                            "cannot tell good groups from bad ones and the gate will rely on the other judge's spread. "
-                            "Check the model (a stub, a broken prompt, or a model too weak to judge).", j, v[0])
-        if all(b[j].get("constant") for j in JUDGES):
-            log.warning("gate calibration: BOTH judges gave constant scores; gate decisions will not be meaningful")
+                msg = (f"gate calibration: judge {j!r} ({self.ctx.llm(j).model_id}) gave all {len(v)} calibration answers "
+                       f"the same score ({v[0]}), so it cannot tell good groups from bad ones. Check the model and its "
+                       f"answers (a stub, a broken prompt, or a model too weak to judge) and use another model")
+                if not self.cfg.allow_constant_judge:
+                    raise RuntimeError(msg + " (or set pipeline.gate.allow_constant_judge: true to continue anyway).")
+                log.warning("%s; continuing because allow_constant_judge is set.", msg)
         allv = [c["score"] for c in calls if c["ok"]]
         b["pooled_mu"] = float(np.mean(allv))
         b["pooled_sd"] = float(np.std(allv)) or 1.0   # a uniform calibration batch would otherwise collapse every adjusted score

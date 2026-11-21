@@ -7,7 +7,11 @@ Contract (identical for all providers):
   more, appending the bad answer and a correction request; if that fails too it returns
   ``{"_error": ..., "_raw": ...}`` instead of raising, so callers count contract failures explicitly.
 * :meth:`LLM.call` is the cached entry point used by the stages. A *reasoning* model whose answer came
-  back empty (its hidden reasoning used the whole budget) is retried once with a larger budget.
+  back empty (its hidden reasoning used the whole budget) is retried once with a larger budget. Only good
+  answers are cached: failed requests never are, and answers that stayed unparseable are not cached unless
+  ``cache_contract_failures=True`` (used to replay runs that cached them).
+* Once a model is unusable (configuration error, or too many failures in a row) every later request to it
+  raises :class:`ModelUnavailableError` at once, so queued work stops without sending more requests.
 
 Concurrency is bounded per LLM by a semaphore; :func:`run_parallel` fans jobs out per model."""
 from __future__ import annotations
@@ -62,12 +66,18 @@ class LLM:
         empty-answer budget retry and text-mode judging.
     budget_usd, ledger, price:
         Optional hard spend cap. ``price`` defaults to the known price for the backend's model name.
+    cache_contract_failures:
+        Also cache answers that stayed unparseable after the retry (default ``False``: a rerun asks again).
+    legacy_cache_keys:
+        Leave the model settings (``reasoning``, backend options) out of the cache keys, to reuse caches
+        written before they were part of the key.
     """
 
     def __init__(self, backend: Backend, name: str | None = None, cache: ResponseCache | None = None,
                  max_concurrency: int = 2, reasoning: bool = False, budget_usd: float | None = None,
                  ledger: Ledger | None = None, price: Price | None = None, transport_retries: int = 2,
-                 max_consecutive_failures: int = 8):
+                 max_consecutive_failures: int = 8, cache_contract_failures: bool = False,
+                 legacy_cache_keys: bool = False):
         self.backend = backend
         self.name = name or backend.model_id
         self.cache = cache
@@ -90,6 +100,27 @@ class LLM:
         self._last_error: str | None = None
         self._inflight_usd = 0.0
         self._local = threading.local()
+        self._unavailable: str | None = None
+        self._zero_usage_warned = False
+        self.cache_contract_failures = cache_contract_failures
+        self.legacy_cache_keys = legacy_cache_keys
+        self.stats["contract_failures"] = 0
+
+    @property
+    def settings(self) -> dict:
+        """Options that change answers without changing the request; part of the cache key and the run manifest."""
+        out = dict(getattr(self.backend, "cache_settings", lambda: {})() or {})
+        if self.reasoning:
+            out["reasoning"] = True
+        return out
+
+    def _key(self, messages, max_tokens, seed, as_json, temperature) -> str:
+        return request_key(self.model_id, messages, max_tokens, seed, as_json, temperature,
+                           None if self.legacy_cache_keys else self.settings)
+
+    def _give_up(self, msg: str):
+        self._unavailable = msg
+        raise ModelUnavailableError(msg)
 
     @property
     def model_id(self) -> str:
@@ -98,6 +129,8 @@ class LLM:
     # ------------------------------------------------------------------ raw calls
     def chat(self, messages: list, max_tokens: int = 800, temperature: float = 0.0, seed: int = 0,
              json_mode: bool = False, stage: str = "") -> str:
+        if self._unavailable:
+            raise ModelUnavailableError(self._unavailable)
         req = ChatRequest(messages=messages, max_tokens=max_tokens, temperature=temperature, seed=seed, json_mode=json_mode)
         estimate = 0.0
         if self.budget is not None:
@@ -116,8 +149,9 @@ class LLM:
                 except BackendConfigError as e:
                     msg = redact(e)
                     log.error("%s (%s): %s", self.name, self.model_id, msg)
-                    raise ModelUnavailableError(f"{self.name} ({self.model_id}) cannot be used: {msg}. Fix the model settings "
-                                                f"and rerun; failed requests were not cached.") from None
+                    self._unavailable = (f"{self.name} ({self.model_id}) cannot be used: {msg}. Fix the model settings "
+                                         f"and rerun; failed requests were not cached.")
+                    raise ModelUnavailableError(self._unavailable) from None
                 except BackendError as e:
                     with self._stats_lock:
                         self.stats["failures"] += 1
@@ -132,9 +166,16 @@ class LLM:
                     self.stats["input_tokens"] += res.input_tokens
                     self.stats["output_tokens"] += res.output_tokens
                     self._consecutive_failures = 0
+                tin, tout = res.input_tokens, res.output_tokens
+                if tin == 0 and tout == 0 and (self.price.input_per_mtok or self.price.output_per_mtok):
+                    # the backend reported no usage: charge an estimate (~4 chars per token) so budgets still hold
+                    tin = sum(len(str(m.get("content", ""))) for m in messages) // 4 + 1
+                    tout = len(res.text or "") // 4 + 1
+                    if not self._zero_usage_warned:
+                        self._zero_usage_warned = True
+                        log.warning("%s: the backend reports no token usage; spend is estimated from text length", self.name)
                 if self.ledger is not None:
-                    self.ledger.record(self.model_id, self.model_id, stage, res.input_tokens, res.output_tokens,
-                                       self.price.cost(res.input_tokens, res.output_tokens))
+                    self.ledger.record(self.model_id, self.model_id, stage, tin, tout, self.price.cost(tin, tout))
                 return res.text
         finally:
             if estimate:
@@ -146,7 +187,7 @@ class LLM:
             self._consecutive_failures += 1
             streak = self._consecutive_failures
         if streak >= self.max_consecutive_failures:
-            raise ModelUnavailableError(f"{self.name} ({self.model_id}): {streak} requests in a row failed; last error: "
+            self._give_up(f"{self.name} ({self.model_id}): {streak} requests in a row failed; last error: "
                                         f"{self._last_error}. Check the server / network / limits and rerun; failed "
                                         f"requests were not cached.")
         return ""
@@ -168,10 +209,10 @@ class LLM:
     def call(self, stage: str, messages: list, max_tokens: int = 600, seed: int = 0, as_json: bool = True,
              temperature: float = 0.0, tag: str = "") -> dict:
         """Cached call. Returns the parsed JSON dict (``as_json``) or ``{"text": ...}``."""
-        key = request_key(self.model_id, messages, max_tokens, seed, as_json, temperature)
+        key = self._key(messages, max_tokens, seed, as_json, temperature)
         if self.cache is not None:
             hit = self.cache.get(key)
-            if hit is not None:
+            if hit is not None and ("_error" not in hit or self.cache_contract_failures):
                 with self._stats_lock:
                     self.stats["cache_hits"] += 1
                 return hit
@@ -193,12 +234,34 @@ class LLM:
             out.setdefault("_error", "request failed")
             out["_transport_error"] = self._last_error or "request failed"
             return out
+        if "_error" in out:
+            with self._stats_lock:
+                self.stats["contract_failures"] += 1
+            if not self.cache_contract_failures:
+                return out
         if self.cache is not None:
             self.cache.put(key, out, model=self.model_id, stage=stage, tag=tag, n_calls=n_calls, secs=round(time.time() - t0, 2))
         return out
 
     def cache_key(self, messages: list, max_tokens: int, seed: int = 0, as_json: bool = True, temperature: float = 0.0) -> str:
-        return request_key(self.model_id, messages, max_tokens, seed, as_json, temperature)
+        return self._key(messages, max_tokens, seed, as_json, temperature)
+
+    def preflight(self) -> None:
+        """Send one tiny request (not cached) and raise :class:`ModelUnavailableError` if the model cannot answer."""
+        if self._unavailable:
+            raise ModelUnavailableError(self._unavailable)
+        saved = self.transport_retries
+        self.transport_retries = 1
+        self._local.failed = False
+        try:
+            text = self.chat([{"role": "user", "content": 'Reply with the JSON object {"ok": true}.'}], max_tokens=400,
+                             json_mode=True, stage="preflight")
+        finally:
+            self.transport_retries = saved
+        if getattr(self._local, "failed", False):
+            self._give_up(f"{self.name} ({self.model_id}) did not answer a test request: {self._last_error}. Check the "
+                          f"model name, key, server and network, then rerun.")
+        log.info("%s (%s): test request answered (%d chars)", self.name, self.model_id, len(text or ""))
 
     def __repr__(self) -> str:
         return f"LLM({self.name!r}, {self.model_id!r}, concurrency={self.max_concurrency}, reasoning={self.reasoning})"
@@ -215,8 +278,11 @@ def run_parallel(jobs: Sequence[Any], fn: Callable[[Any], Any], llm_of: Callable
         if p is None:
             p = pools[id(m)] = ThreadPoolExecutor(workers_per_llm or max(1, m.max_concurrency * 2))
         futs.append(p.submit(fn, jb))
+    ok = False
     try:
-        return [f.result() for f in futs]
+        out = [f.result() for f in futs]
+        ok = True
+        return out
     finally:
         for p in pools.values():
-            p.shutdown()
+            p.shutdown(cancel_futures=not ok)   # on an error, drop the jobs that have not started

@@ -39,6 +39,15 @@ class OllamaBackend:
         self._session = None
         self._lock = threading.Lock()
 
+    def cache_settings(self) -> dict:
+        """Options that change answers (non-default values only, so default keys stay stable)."""
+        out = {}
+        if self.num_ctx != 8192:
+            out["num_ctx"] = self.num_ctx
+        if self.think is not None:
+            out["think"] = self.think
+        return out
+
     def _http(self):
         import requests
         with self._lock:
@@ -112,6 +121,9 @@ class OpenAICompatibleBackend:
         self._client = None
         self._lock = threading.Lock()
 
+    def cache_settings(self) -> dict:
+        return {} if self.supports_json_mode else {"json_mode": False}
+
     def _key(self):
         if self._api_key:
             return self._api_key
@@ -183,6 +195,16 @@ class AnthropicBackend:
         self.model_id = f"anthropic:{model}"
         self._client = None
         self._lock = threading.Lock()
+
+    def cache_settings(self) -> dict:
+        out = {}
+        if self.thinking != {"type": "disabled"}:
+            out["thinking"] = self.thinking
+        if self.effort != "low":
+            out["effort"] = self.effort
+        if self.max_tokens_cap != 4000:
+            out["max_tokens_cap"] = self.max_tokens_cap
+        return out
 
     def _get(self):
         with self._lock:

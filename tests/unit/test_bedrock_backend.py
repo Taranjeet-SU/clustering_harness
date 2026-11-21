@@ -33,8 +33,8 @@ class _Server:
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])) or b"{}")
                 srv.requests.append({"path": self.path, "headers": dict(self.headers), "body": body})
                 if srv.fail_next:
-                    code, err = srv.fail_next.pop(0)
-                    out = json.dumps({"message": err}).encode()
+                    code, err, *msg = srv.fail_next.pop(0)          # (status, error type[, message])
+                    out = json.dumps({"message": msg[0] if msg else err}).encode()
                     self.send_response(code)
                     self.send_header("x-amzn-ErrorType", err)
                 else:
@@ -245,3 +245,12 @@ def test_azure_and_gemini_specs_build_openai_clients():
     assert type(az._get()).__name__ == "AzureOpenAI"
     ge = build_backend({"backend": "gemini", "model": "gemini-2.5-flash", "api_key_provider": lambda: "k"})
     assert ge.base_url.startswith("https://generativelanguage.googleapis.com/") and ge.supports_seed is False
+
+
+def test_invalid_model_id_is_a_config_error(server):
+    from clustering_harness.llm import BackendConfigError
+    server.fail_next = [(400, "ValidationException", "The provided model identifier is invalid.")]
+    be = BedrockBackend("no-such-model", region="us-east-1", endpoint_url=server.url, max_retries=1,
+                        credentials={"aws_access_key_id": "AKIA1", "aws_secret_access_key": "s"})
+    with pytest.raises(BackendConfigError, match="model identifier"):
+        be.complete(REQ)

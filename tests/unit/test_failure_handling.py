@@ -99,15 +99,22 @@ def _calls(scores):
             for i, (sa, sb) in enumerate(scores) for j, s in (("a", sa), ("b", sb))]
 
 
-def test_constant_judge_is_flagged(caplog):
-    stub = types.SimpleNamespace(ctx=types.SimpleNamespace(load=lambda *a: None, save=lambda *a: None), calib_path=("x",))
+def _gate_stub(allow):
+    llm = types.SimpleNamespace(model_id="stub:judge")
+    ctx = types.SimpleNamespace(load=lambda *a: None, save=lambda *a: None, llm=lambda j: llm)
+    return types.SimpleNamespace(ctx=ctx, calib_path=("x",), cfg=types.SimpleNamespace(allow_constant_judge=allow))
+
+
+def test_constant_judge_stops_the_run():
+    with pytest.raises(RuntimeError, match="judge 'a' .* gave all 6 calibration answers the same score"):
+        Gate.calibrate(_gate_stub(False), _calls([(4, 3), (4, 5), (4, 2), (4, 4), (4, 5), (4, 1)]))
+
+
+def test_constant_judge_allowed_when_configured(caplog):
     with caplog.at_level(logging.WARNING, logger="clustering_harness"):
-        b = Gate.calibrate(stub, _calls([(4, 3), (4, 5), (4, 2), (4, 4), (4, 5), (4, 1)]))
+        b = Gate.calibrate(_gate_stub(True), _calls([(4, 3), (4, 5), (4, 2), (4, 4), (4, 5), (4, 1)]))
     assert b["a"].get("constant") and not b["b"].get("constant")
-    assert "judge 'a' gave every calibration group the same score" in caplog.text
-    with caplog.at_level(logging.WARNING, logger="clustering_harness"):
-        Gate.calibrate(stub, _calls([(4, 4)] * 6))
-    assert "BOTH judges gave constant scores" in caplog.text
+    assert "allow_constant_judge is set" in caplog.text
 
 
 def test_keys_echoed_by_providers_are_redacted(tmp_path, caplog):
@@ -143,3 +150,55 @@ def test_openai_status_codes_are_classified_without_the_sdk():
         with pytest.raises(BackendError) as e:
             backend(code).complete(req)
         assert not isinstance(e.value, BackendConfigError)
+
+
+def test_unusable_model_refuses_later_requests_without_sending_them(tmp_path):
+    fl = Flaky(BackendConfigError("401 invalid api key"))
+    llm = LLM(CallableBackend(fl, "bad:key"), name="a")
+    with pytest.raises(ModelUnavailableError):
+        llm.call("s", MSG)
+    for i in range(5):                                             # queued jobs stop at once
+        with pytest.raises(ModelUnavailableError, match="invalid api key"):
+            llm.call("s", [{"role": "user", "content": f"q{i}"}])
+    assert fl.calls == 1
+
+
+def test_run_parallel_drops_queued_jobs_after_a_fatal_error():
+    from clustering_harness.llm.client import run_parallel
+    fl = Flaky(BackendConfigError("403 forbidden"))
+    llm = LLM(CallableBackend(fl, "bad:key"), name="a", max_concurrency=1)
+    with pytest.raises(ModelUnavailableError):
+        run_parallel(list(range(50)), lambda i: llm.call("s", [{"role": "user", "content": str(i)}]), lambda i: llm)
+    assert fl.calls == 1
+
+
+def test_zero_token_backend_is_still_charged(tmp_path, caplog):
+    led = Ledger(tmp_path / "l.sqlite")
+    llm = LLM(CallableBackend(lambda r: '{"ok": 1}', "custom:x"), name="a", ledger=led, budget_usd=0.01,
+              price=Price(1000.0, 0.0))                          # input-only price keeps the estimates small
+    with caplog.at_level(logging.WARNING, logger="clustering_harness"):
+        llm.call("s", MSG)
+    assert led.spent("custom:x") > 0 and "reports no token usage" in caplog.text
+    with pytest.raises(BudgetExceeded):
+        for i in range(200):
+            llm.call("s", [{"role": "user", "content": f"q{i}"}])
+    assert led.spent("custom:x") <= 0.01 + 1e-9
+
+
+def test_settings_are_part_of_the_cache_key(tmp_path):
+    cache = ResponseCache(tmp_path / "c.sqlite")
+    calls = []
+    be = CallableBackend(lambda r: calls.append(1) or '{"v": 1}', "m:1")
+    LLM(be, cache=cache).call("s", MSG)
+    LLM(be, cache=cache, reasoning=True).call("s", MSG)          # a different setting: asks again
+    assert len(calls) == 2
+    LLM(be, cache=cache, reasoning=True, legacy_cache_keys=True).call("s", MSG)   # legacy keys match the first entry
+    assert len(calls) == 2
+
+
+def test_backend_settings_change_the_key():
+    from clustering_harness.llm import AnthropicBackend, OllamaBackend
+    k = lambda be: LLM(be).cache_key(MSG, 100)                    # noqa: E731
+    assert k(OllamaBackend("q")) == k(OllamaBackend("q", think=None))
+    assert k(OllamaBackend("q")) != k(OllamaBackend("q", think="low"))
+    assert k(AnthropicBackend("h")) != k(AnthropicBackend("h", effort="high"))
