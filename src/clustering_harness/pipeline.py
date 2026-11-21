@@ -106,7 +106,14 @@ def _manifest_changes(prev: dict, new: dict) -> list:
     for k in ("records", "data_fingerprint", "models", "model_settings", "prompts_fingerprint", "embedder",
               "embedder_options", "label_embedder", "label_embedder_options", "vectors_fingerprint"):
         if k in prev and prev[k] != new[k]:
-            out.append((k, _LABELS.get(k) or f"{k}: {_short(prev[k])} -> {_short(new[k])}"))
+            a, b = prev[k], new[k]
+            if k in _LABELS:
+                out.append((k, _LABELS[k]))
+            elif isinstance(a, dict) and isinstance(b, dict):     # e.g. models: name the slot and show the full change
+                out.append((k, "; ".join(f"{k}.{s}: {_short(a.get(s), 200)} -> {_short(b.get(s), 200)}"
+                                         for s in sorted(set(a) | set(b)) if a.get(s) != b.get(s))))
+            else:
+                out.append((k, f"{k}: {_short(a, 200)} -> {_short(b, 200)}"))
     if "config" in prev:
         for sect in sorted(set(prev["config"]) | set(new["config"])):
             a, b = prev["config"].get(sect), new["config"].get(sect)
@@ -558,6 +565,20 @@ class Pipeline:
                    "llm_usage": {k: m.stats for k, m in self.llms.items()},
                    "model_problems": self._model_problems(),
                    "wall_minutes_this_call": round((time.time() - T0) / 60, 1), "human_validated": False}
+        prev_p = out_dir / "summary.json"
+        if prev_p.exists():
+            # a resume or `compare` reaches export again: keep the usage and time of the calls that did the work
+            try:
+                prev = json.loads(prev_p.read_text())
+            except Exception:  # noqa: BLE001
+                prev = {}
+            summary["llm_usage_this_call"] = summary["llm_usage"]
+            summary["llm_usage"] = {k: {s: (v or 0) + (prev.get("llm_usage", {}).get(k, {}).get(s) or 0)
+                                        for s, v in u.items()} for k, u in summary["llm_usage"].items()}
+            summary["wall_minutes_total"] = round((prev.get("wall_minutes_total") or prev.get("wall_minutes_this_call") or 0)
+                                                  + summary["wall_minutes_this_call"], 1)
+        else:
+            summary["wall_minutes_total"] = summary["wall_minutes_this_call"]
         write_json(summary, out_dir / "summary.json")
         for slot, p in summary["model_problems"].items():
             log.warning("model %s (%s): %d unparseable answer(s) and %d rejected request(s) in stage(s) %s; those items were "

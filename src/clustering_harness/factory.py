@@ -93,14 +93,20 @@ WRAPPER_OPTIONS = ("reasoning", "concurrency", "budget_usd", "price_in", "price_
                    "legacy_cache_keys", "max_consecutive_failures", "budget_scope", "name")
 
 
-def _known_options() -> list:
-    """Every option name accepted by a built-in backend factory or the LLM wrapper (for typo suggestions)."""
+def _known_options(kind: str | None = None) -> list:
+    """Option names accepted by the given built-in backend kind (all kinds if unknown) and the LLM wrapper."""
     import inspect
     from .llm.bedrock import BedrockBackend
-    names = set(WRAPPER_OPTIONS) | {"model", "url", "num_ctx", "think", "keep_alive", "json_mode", "seed", "deployment",
-                                     "model_id", "backend"}
-    for cls in (OllamaBackend, OpenAICompatibleBackend, AnthropicBackend, BedrockBackend):
-        names |= {p for p in inspect.signature(cls.__init__).parameters if p != "self" and not p.startswith("_")}
+    by_kind = {"ollama": (OllamaBackend, {"url", "num_ctx", "think", "keep_alive"}),
+               "anthropic": (AnthropicBackend, set()), "bedrock": (BedrockBackend, set()), "offline": (None, {"model_id"})}
+    for k in ("openai", "openai_compatible", "azure_openai", "gemini"):
+        by_kind[k] = (OpenAICompatibleBackend, {"json_mode", "seed", "deployment"})
+    picked = [by_kind[kind]] if kind in by_kind else list(by_kind.values())
+    names = set(WRAPPER_OPTIONS) | {"model", "backend"}
+    for cls, extra in picked:
+        names |= extra
+        if cls is not None:
+            names |= {p for p in inspect.signature(cls.__init__).parameters if p != "self" and not p.startswith("_")}
     return sorted(names)
 
 
@@ -120,7 +126,7 @@ def build_backend(spec: dict):
     if kind in _BACKENDS:
         be = _BACKENDS[kind](s)
         if s:
-            raise ValueError(f"unknown option(s) for backend {kind!r}: {_hints(s, _known_options())}")
+            raise ValueError(f"unknown option(s) for backend {kind!r}: {_hints(s, _known_options(kind))}")
     elif ":" in str(kind):
         from .llm.bedrock import resolve_callable
         be = resolve_callable(kind)(**s)

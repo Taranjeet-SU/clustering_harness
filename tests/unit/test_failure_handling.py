@@ -255,8 +255,8 @@ def test_many_rejections_in_a_row_stop_the_model():
     def fn(req):
         raise RequestRejectedError("400 unsupported parameter")
 
-    llm = LLM(CallableBackend(fn, "m:1"), max_consecutive_failures=3)
-    with pytest.raises(ModelUnavailableError):
+    llm = LLM(CallableBackend(fn, "m:1"), max_consecutive_rejections=3)
+    with pytest.raises(ModelUnavailableError, match="3 requests in a row were rejected"):
         for i in range(5):
             llm.call("s", [{"role": "user", "content": f"q{i}"}])
 
@@ -321,3 +321,25 @@ def test_indic_and_thai_text_is_not_junk():
     j = JunkRule()
     assert not j.is_junk("मेरा कार्ड खो गया", "")
     assert not j.is_junk("บัตรของฉันหาย", "")
+
+
+def test_a_burst_of_rejections_below_the_limit_does_not_stop_the_model():
+    from clustering_harness.llm import RequestRejectedError
+    n = {"i": 0}
+
+    def fn(req):
+        n["i"] += 1
+        if n["i"] <= 10:
+            raise RequestRejectedError("400 content filter")
+        return '{"ok": 1}'
+
+    llm = LLM(CallableBackend(fn, "m:1"))                         # default: 25 rejections in a row
+    for i in range(12):
+        llm.call("s", [{"role": "user", "content": f"q{i}"}])
+    assert llm.stats["rejected"] == 10 and llm.stats["requests"] == 2
+
+
+def test_cost_of_this_run_is_tracked():
+    llm = LLM(CallableBackend(lambda r: ChatResult('{"ok": 1}', 1000, 1000), "custom:1"), price=Price(1.0, 1.0))
+    llm.call("s", MSG)
+    assert abs(llm.stats["usd"] - 0.002) < 1e-9

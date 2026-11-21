@@ -114,8 +114,12 @@ class HFTransformerEmbedder:
 
     def __init__(self, model: str = "Alibaba-NLP/gte-large-en-v1.5", pooling: str = "cls", max_length: int = 8192,
                  device: str | None = "cpu", batch_tokens: int = 32768, half: bool = True, store_float16: bool = True,
-                 trust_remote_code: bool = True, local_files_only: bool = False, query_prefix: str = ""):
+                 trust_remote_code: bool = True, local_files_only: bool = False, query_prefix: str = "",
+                 revision: str | None = None, code_revision: str | None = None):
         self.model = model
+        # pin the model weights (revision) and, for models that run their own code, that code (code_revision)
+        self.revision = revision
+        self.code_revision = code_revision
         self.pooling = pooling
         self.max_length = max_length
         if device in (None, "auto"):
@@ -128,7 +132,8 @@ class HFTransformerEmbedder:
         self.trust_remote_code = trust_remote_code
         self.local_files_only = local_files_only
         self.query_prefix = query_prefix
-        self.name = f"hf:{model}:{pooling}:{max_length}" + (":fp16" if half and device.startswith("cuda") else "")
+        self.name = (f"hf:{model}" + (f"@{revision}" if revision else "") + f":{pooling}:{max_length}"
+                     + (":fp16" if half and device.startswith("cuda") else ""))
         self.last_stats: dict = {}
 
     def encode(self, texts: Sequence[str]) -> np.ndarray:
@@ -136,13 +141,15 @@ class HFTransformerEmbedder:
         from transformers import AutoModel, AutoTokenizer
         texts = [self.query_prefix + (t or "") for t in texts]
         dev = self.device
-        tok = AutoTokenizer.from_pretrained(self.model, local_files_only=self.local_files_only, trust_remote_code=self.trust_remote_code)
+        pins = {k: v for k, v in (("revision", self.revision), ("code_revision", self.code_revision)) if v}
+        tok = AutoTokenizer.from_pretrained(self.model, local_files_only=self.local_files_only, trust_remote_code=self.trust_remote_code,
+                                            **{k: v for k, v in pins.items() if k == "revision"})
         enc = tok(texts, truncation=True, max_length=self.max_length, add_special_tokens=True)["input_ids"]
         raw_len = np.array([len(x) for x in tok(texts, truncation=False, add_special_tokens=True)["input_ids"]])
         lengths = np.array([len(x) for x in enc])
         log.info("embed: loading %s on %s", self.model, dev)
         am = AutoModel.from_pretrained(self.model, trust_remote_code=self.trust_remote_code, local_files_only=self.local_files_only,
-                                       dtype=torch.float32).to(dev).eval()
+                                       dtype=torch.float32, **pins).to(dev).eval()
         _fix_gte_buffers(am)
         if self.half and dev.startswith("cuda"):
             am = am.half()
@@ -227,7 +234,8 @@ class OpenAIEmbedder:
 
     def encode(self, texts: Sequence[str]) -> np.ndarray:
         from openai import OpenAI
-        client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        from .llm.backends import OPENAI_URL
+        client = OpenAI(api_key=self.api_key, base_url=self.base_url or OPENAI_URL)   # not OPENAI_BASE_URL
         rows = []
         for i in range(0, len(texts), self.batch_size):
             kw = {"model": self.model, "input": [t or " " for t in texts[i:i + self.batch_size]]}

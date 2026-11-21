@@ -274,3 +274,12 @@ def test_provider_model_override_is_known_before_the_first_request():
                         credentials_provider=lambda: {"aws_access_key_id": "AKIA1", "aws_secret_access_key": "s",
                                                       "model_id": "us.anthropic.claude-haiku-5-5-v1:0"})
     assert be.model_id == "bedrock:us.anthropic.claude-haiku-5-5-v1:0"   # cache key, price and budget use the real model
+
+
+def test_explicit_profile_wins_over_bearer_token_variable(monkeypatch, tmp_path):
+    cfg = tmp_path / "config"
+    cfg.write_text("[profile research]\nregion = us-east-1\n")
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(cfg))
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "bearer-xyz")
+    creds = BedrockBackend("m", profile_name="research")._resolve()
+    assert "aws_bearer_token_bedrock" not in creds

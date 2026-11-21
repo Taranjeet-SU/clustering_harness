@@ -167,7 +167,8 @@ class BedrockBackend:
                     raise BackendConfigError(f"bedrock credentials_provider switched the model from {self.model!r} to "
                                              f"{new!r} during the run; cached answers and budgets are per model, so "
                                              f"restart with the new model")
-        if "aws_bearer_token_bedrock" not in creds and "aws_access_key_id" not in creds and os.environ.get(self.bearer_token_env):
+        if "aws_bearer_token_bedrock" not in creds and "aws_access_key_id" not in creds and not creds.get("profile_name") \
+                and not creds.get("role_arn") and os.environ.get(self.bearer_token_env):   # explicit settings win
             creds["aws_bearer_token_bedrock"] = os.environ[self.bearer_token_env]
         creds.setdefault("region", self.region or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION"))
         if not creds["region"]:

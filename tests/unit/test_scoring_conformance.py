@@ -309,7 +309,7 @@ def test_invalid_responses_retried_then_fail(tmp_path):
     k2a = [i for i in fk["a"].of("score_judgment") if i.payload()["cluster_id"] == "K2"]
     assert len(k2a) == 3                                               # three attempts in total
     assert list((ctx.workdir / "cache" / "scoring").glob("K2.adaptive_rep0.*.a.attempt2.error.json"))
-    with pytest.raises(RuntimeError, match="incomplete model reviews"):
+    with pytest.raises(RuntimeError, match=r"model review of .* cluster\(s\) failed"):
         sc.run()
 
 

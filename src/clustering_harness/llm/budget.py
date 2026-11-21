@@ -106,7 +106,7 @@ class Budget:
         spent = self.ledger.spent(self.scope)
         if spent + reserved + request_estimate > self.limit_usd or spent >= self.limit_usd:
             raise BudgetExceeded(f"budget for {self.scope!r} exhausted: ${spent:.4f} spent (+${reserved:.4f} in flight) "
-                                 f"of ${self.limit_usd:.2f}. Raise budget_usd and rerun: finished work is cached, so "
+                                 f"of ${self.limit_usd:.4g}. Raise budget_usd and rerun: finished work is cached, so "
                                  f"you only pay for the rest")
 
     def remaining(self) -> float:

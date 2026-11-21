@@ -327,7 +327,8 @@ class ClusterScorer:
                     failures.append({"cluster_id": c, "error": str(e)})
                 self.ctx.progress("scoring", clusters_total=len(self.cids), clusters_completed=len(rows), clusters_failed=len(failures))
         if failures:
-            raise RuntimeError(f"incomplete model reviews: {failures[:3]}")
+            raise RuntimeError(f"scoring: the model review of {len(failures)} cluster(s) failed, e.g. {failures[:2]}. Check the "
+                               f"model warnings above; rerun the same command to retry them (finished reviews are cached)")
         score = pd.DataFrame(rows)
         score = score.sort_values(["case_count", "cluster_id"], ascending=[False, True]).reset_index(drop=True)
         norm = score.cluster_name.str.lower().str.replace(r"[^a-z0-9 ]", "", regex=True).str.strip()

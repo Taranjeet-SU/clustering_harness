@@ -80,7 +80,7 @@ class LLM:
                  max_concurrency: int = 2, reasoning: bool = False, budget_usd: float | None = None,
                  ledger: Ledger | None = None, price: Price | None = None, transport_retries: int = 2,
                  max_consecutive_failures: int = 8, cache_contract_failures: bool = False,
-                 legacy_cache_keys: bool = False, budget_scope: str | None = None):
+                 legacy_cache_keys: bool = False, budget_scope: str | None = None, max_consecutive_rejections: int = 25):
         self.backend = backend
         self.name = name or backend.model_id
         self.cache = cache
@@ -118,6 +118,9 @@ class LLM:
         self.legacy_cache_keys = legacy_cache_keys
         self.stats["contract_failures"] = 0
         self.stats["rejected"] = 0
+        self.stats["usd"] = 0.0
+        self.max_consecutive_rejections = max_consecutive_rejections
+        self._consecutive_rejections = 0
 
     @property
     def settings(self) -> dict:
@@ -170,7 +173,13 @@ class LLM:
                     if n <= 3 or n % 50 == 0:
                         log.warning("%s: request rejected by the provider (%d so far): %s", self.name, n, redact(e)[:300])
                     self._local.rejected = True
-                    break
+                    with self._stats_lock:
+                        self._consecutive_rejections += 1
+                        rstreak = self._consecutive_rejections
+                    if rstreak >= self.max_consecutive_rejections:
+                        self._give_up(f"{self.name} ({self.model_id}): {rstreak} requests in a row were rejected; last: "
+                                      f"{self._last_error}. The model or its settings do not fit these requests")
+                    return ""
                 except BackendConfigError as e:
                     msg = redact(e)
                     log.error("%s (%s): %s", self.name, self.model_id, msg)
@@ -193,6 +202,7 @@ class LLM:
                     self.stats["input_tokens"] += res.input_tokens
                     self.stats["output_tokens"] += res.output_tokens
                     self._consecutive_failures = 0
+                    self._consecutive_rejections = 0
                 tin, tout = res.input_tokens, res.output_tokens
                 if tin == 0 and tout == 0 and (self.price.input_per_mtok or self.price.output_per_mtok):
                     # the backend reported no usage: charge an estimate (~4 chars per token) so budgets still hold
@@ -201,16 +211,18 @@ class LLM:
                     if not self._zero_usage_warned:
                         self._zero_usage_warned = True
                         log.warning("%s: the backend reports no token usage; spend is estimated from text length", self.name)
+                cost = self.price.cost(tin, tout)
+                with self._stats_lock:
+                    self.stats["usd"] += cost
                 if self.ledger is not None:
-                    self.ledger.record(self.budget_scope, self.model_id, stage, tin, tout, self.price.cost(tin, tout))
+                    self.ledger.record(self.budget_scope, self.model_id, stage, tin, tout, cost)
                 return res.text
         finally:
             if estimate:
                 with self._stats_lock:
                     self._inflight_usd -= estimate
-        # every attempt failed (or the request was rejected): not cached; give up if the model looks down
-        if not getattr(self._local, "rejected", False):
-            self._local.failed = True
+        # every attempt failed: mark the call so that it is not cached, and give up if the model looks down
+        self._local.failed = True
         with self._stats_lock:
             self._consecutive_failures += 1
             streak = self._consecutive_failures

@@ -38,7 +38,7 @@ clinc150 out-of-scope queries are dropped if you leave their label empty.
 
 | policy | meaning | when to use |
 |---|---|---|
-| `"singleton"` (default) | Each noise record becomes its own cluster. | Conservative standard. Leaving records unassigned is penalised in recall-type scores, and there is no reward for purity. |
+| `"singleton"` (default) | Each noise record becomes its own cluster. | Conservative standard. Leaving records unassigned is penalised in recall-type scores (inverse purity, BCubed recall, ARI). Purity itself *rises*, because every singleton is perfectly pure, so compare purity only between partitions with similar coverage (on BANKING77, UMAP+HDBSCAN scores 0.879 with singletons, 0.864 with noise excluded, 0.778 with noise as one cluster). |
 | `"cluster"` | All noise records form one extra cluster. | Matches treating "noise" as a catch-all bucket. Penalises precision-type scores. |
 | `"exclude"` | Noise records are removed from both partitions before scoring. | Quality of the clustered part only. **Always report it together with `coverage`.** |
 

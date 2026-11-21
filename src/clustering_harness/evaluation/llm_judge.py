@@ -61,6 +61,21 @@ class LLMJudge:
         self.path = ctx.workdir / "cache" / "judge.jsonl"
         self._lock = threading.Lock()
         self._mem: dict | None = None
+        self._tags: dict = {}
+        self._failed: dict = {}                    # failed judgments of this process (counted, never persisted)
+
+    def _tag(self, judge: str) -> str:
+        """Identity of a judge: its model, model settings and the prompt set. Part of every record key, so changing
+        the model or the prompts never reuses another judge's scores."""
+        if judge not in self._tags:
+            llm = self.ctx.llm(judge)
+            ident = json.dumps([llm.model_id, getattr(llm, "settings", {}), self.ctx.prompts.fingerprint()],
+                               sort_keys=True, default=str)
+            self._tags[judge] = hashlib.sha1(ident.encode()).hexdigest()[:10]
+        return self._tags[judge]
+
+    def key(self, arm, cid, rep, judge, h) -> str:
+        return f"{arm}|{cid}|{rep}|R|{judge}|{h}|{self._tag(judge)}"
 
     # ------------------------------------------------------------------ record store
     def records(self) -> dict:
@@ -114,7 +129,7 @@ class LLMJudge:
 
     def job(self, arm, cid, members, rep, judge, stage) -> dict:
         h = mhash(members, self.ctx)
-        key = f"{arm}|{cid}|{rep}|R|{judge}|{h}"
+        key = self.key(arm, cid, rep, judge, h)
         hit = self.records().get(key)
         if hit is not None:
             return hit
@@ -123,6 +138,10 @@ class LLMJudge:
         r = self.ask(judge, self.messages(sids), stage)
         rec = {"key": key, "arm": arm, "cluster": str(cid), "replicate": rep, "judge": judge, "size": len(members), "mhash": h,
                "sample_ids": sids, "stage": stage, "secs": round(time.time() - t0, 2), **r}
+        if rec.get("coherence") is None:           # a failed judgment is not stored: the next evaluation asks again
+            with self._lock:
+                self._failed[key] = rec
+            return rec
         self._append(rec)
         return rec
 
@@ -136,19 +155,20 @@ class LLMJudge:
 
     def frame(self, arm: str, clusters: dict) -> pd.DataFrame:
         recs = self.records()
+        failed = self._failed
         rows = []
         for cid, ms in clusters.items():
             h = mhash(ms, self.ctx)
-            keys = {j: [f"{arm}|{cid}|{r}|R|{j}|{h}" for r in range(self.reps)] for j in self.judges}
+            keys = {j: [self.key(arm, cid, r, j, h) for r in range(self.reps)] for j in self.judges}
             vals = {j: [recs[k]["coherence"] for k in ks if k in recs and recs[k].get("coherence") is not None] for j, ks in keys.items()}
             allv = [v for j in self.judges for v in vals[j]]
             names = [recs[k]["name"] for r in range(self.reps) for j in self.judges
-                     if (k := f"{arm}|{cid}|{r}|R|{j}|{h}") in recs and recs[k].get("name")]
+                     if (k := self.key(arm, cid, r, j, h)) in recs and recs[k].get("name")]
             per = {j: float(np.mean(v)) if v else np.nan for j, v in vals.items()}
             rows.append({"arm": arm, "cluster": str(cid), "size": len(ms), "n": len(allv), "mean": float(np.mean(allv)) if allv else np.nan,
                          **{f"judge_{j}": per[j] for j in self.judges},
                          "balanced": float(np.mean(list(per.values()))) if all(v == v for v in per.values()) else np.nan,
-                         "fails": sum(1 for ks in keys.values() for k in ks if k in recs and recs[k].get("coherence") is None),
+                         "fails": sum(1 for ks in keys.values() for k in ks if k in failed or (k in recs and recs[k].get("coherence") is None)),
                          "judge_name": names[0] if names else ""})
         return pd.DataFrame(rows)
 

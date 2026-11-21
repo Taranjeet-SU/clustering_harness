@@ -20,9 +20,16 @@ __all__ = ["OllamaBackend", "OpenAICompatibleBackend", "AnthropicBackend", "Call
            "OfflineCallError"]
 
 
+OPENAI_URL = "https://api.openai.com/v1"
+ANTHROPIC_URL = "https://api.anthropic.com"
+
+
 def _is_openai_host(base_url: str | None) -> bool:
     from urllib.parse import urlparse
-    return base_url is None or (urlparse(base_url).hostname or "").endswith("api.openai.com")
+    if base_url is None:
+        return True
+    u = urlparse(base_url)
+    return u.scheme == "https" and (u.hostname or "") == "api.openai.com"
 
 
 def resolve_api_key(api_key_env: str | None, base_url: str | None = None, azure: bool = False) -> str:
@@ -174,7 +181,9 @@ class OpenAICompatibleBackend:
                     self._client = AzureOpenAI(azure_endpoint=self.azure_endpoint, api_version=self.api_version, **kw)
                 else:
                     from openai import OpenAI
-                    self._client = OpenAI(base_url=self.base_url, **kw)
+                    # always an explicit URL: the SDK would otherwise follow OPENAI_BASE_URL from the environment
+                    # and send OPENAI_API_KEY there while answers are cached and priced as OpenAI's
+                    self._client = OpenAI(base_url=self.base_url or OPENAI_URL, **kw)
         return self._client
 
     def complete(self, request: ChatRequest) -> ChatResult:
@@ -258,8 +267,7 @@ class AnthropicBackend:
                     raise BackendConfigError(f"anthropic {self.model}: the environment variable {self._api_key_env} "
                                              f"(api_key_env) is not set")
                 kw["api_key"] = key
-                if self.base_url:
-                    kw["base_url"] = self.base_url
+                kw["base_url"] = self.base_url or ANTHROPIC_URL   # never ANTHROPIC_BASE_URL from the environment
                 self._client = anthropic.Anthropic(**kw)
         return self._client
 

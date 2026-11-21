@@ -85,3 +85,25 @@ def test_anthropic_named_key_unset_is_an_error(monkeypatch):
     monkeypatch.delenv("PROXY_KEY", raising=False)
     with pytest.raises(BackendConfigError, match="PROXY_KEY"):
         AnthropicBackend("claude-haiku-5-5", api_key_env="PROXY_KEY", base_url="http://127.0.0.1:9").complete(REQ)
+
+
+def test_openai_base_url_environment_variable_cannot_redirect_the_key(server, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-real-openai-key-123456")
+    monkeypatch.setenv("OPENAI_BASE_URL", server.url)               # e.g. left over in a shell profile
+    be = build_backend({"backend": "openai", "model": "gpt-4o-mini", "timeout": 2, "max_retries": 0})
+    assert str(be._get().base_url).startswith("https://api.openai.com")
+    assert server.seen == []
+
+
+def test_key_is_not_sent_to_openai_over_plain_http(monkeypatch):
+    from clustering_harness.llm.backends import resolve_api_key
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-real")
+    assert resolve_api_key("auto", "http://api.openai.com/v1") == "not-needed"
+
+
+def test_anthropic_base_url_environment_variable_is_ignored(monkeypatch):
+    pytest.importorskip("anthropic")
+    from clustering_harness.llm import AnthropicBackend
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
+    assert str(AnthropicBackend("claude-haiku-5-5")._get().base_url).startswith("https://api.anthropic.com")

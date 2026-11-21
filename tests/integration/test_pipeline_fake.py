@@ -364,6 +364,7 @@ def test_model_problems_survive_a_cached_rerun(run, tmp_path):
         return good(req)
 
     llms["b"].backend.fn = picky
+    llms["b"].max_consecutive_rejections = 10 ** 6       # deterministic: no early stop on an unlucky run of rejections
     wd = tmp_path / "w"
     res = Pipeline(config(), llms=llms, label_embedder=HashEmbedder(), vectors=X, workdir=wd).run(ds)
     probs = res.summary["model_problems"]
@@ -371,3 +372,27 @@ def test_model_problems_survive_a_cached_rerun(run, tmp_path):
     llms2, _ = fake_llms()
     res2 = Pipeline(config(), llms=llms2, label_embedder=HashEmbedder(), vectors=X, workdir=wd).run(ds)
     assert res2.summary["model_problems"] == probs                  # still reported after a cached rerun
+
+
+def test_judge_scores_are_not_reused_for_another_model(run, tmp_path):
+    ds, X, wd, res, *_ = run
+    from clustering_harness.context import RunContext
+    from clustering_harness.evaluation.llm_judge import LLMJudge
+    from clustering_harness.llm import LLM, CallableBackend
+    ctx = RunContext(ds=ds, cfg=config(), llms=fake_llms()[0], workdir=tmp_path / "j", X=X)
+    clusters = {c: g.ticket_id.tolist() for c, g in res.assignments[res.assignments.status == "cluster"].groupby("cluster_id")}
+    few = dict(list(clusters.items())[:3])
+    LLMJudge(ctx, reps=1).evaluate("pipe", few)
+    calls = []
+    other = LLM(CallableBackend(lambda r: calls.append(1) or '{"coherence": 2, "name": "x", "reason": "y"}', "other:model"))
+    ctx2 = RunContext(ds=ds, cfg=config(), llms={"a": ctx.llms["a"], "b": other}, workdir=tmp_path / "j", X=X)
+    LLMJudge(ctx2, reps=1).evaluate("pipe", few)
+    assert len(calls) == 3                                           # the new judge b was asked; old scores not reused
+
+
+def test_summary_keeps_usage_across_resumes(run):
+    ds, X, wd, res, llms, *_ = run
+    llms2, _ = fake_llms()
+    res2 = Pipeline(config(), llms=llms2, label_embedder=HashEmbedder(), vectors=X, workdir=wd).run(ds)
+    assert res2.summary["llm_usage"]["a"]["requests"] >= res.summary["llm_usage"]["a"]["requests"] > 0
+    assert res2.summary["llm_usage_this_call"]["a"]["requests"] == 0

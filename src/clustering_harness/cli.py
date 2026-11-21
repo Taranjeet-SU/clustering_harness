@@ -121,6 +121,7 @@ def load_spec(path: str | Path) -> dict:
     if missing:
         raise ValueError(f"models: slots 'a' and 'b' are both required (missing {sorted(missing)})")
     spec.setdefault("workdir", f"runs/{path.stem}")
+    spec["_spec_dir"] = str(base)
     return spec
 
 
@@ -182,6 +183,12 @@ def build_from_spec(spec: dict, ds=None, workdir: str | Path | None = None, conf
     from .pipeline import Pipeline
     ds = ds if ds is not None else load_data(spec["data"])
     wd = Path(workdir or spec["workdir"]).expanduser()
+    other = spec.get("_spec_dir") and Path(spec["_spec_dir"]) / wd
+    if not wd.is_absolute() and not wd.exists() and other and other.resolve() != wd.resolve() and other.exists():
+        logging.getLogger("clustering_harness").warning(
+            "workdir %s does not exist here, but %s does: relative workdirs are resolved from the folder you run the "
+            "command in. Run from %s (or use an absolute workdir) to resume it instead of paying for every model call "
+            "again.", wd, other, spec["_spec_dir"])
     cfg = config or build_config(spec.get("pipeline"), len(ds))
     cache = ResponseCache(wd / "cache" / "llm.sqlite")
     ledger = Ledger(Path(ledger_path or spec.get("ledger") or wd / "spend.sqlite").expanduser())
@@ -337,7 +344,8 @@ def _main(argv=None) -> int:
                 print(f"warning: model {slot}: {p['unparseable_answers']} unparseable answer(s), {p['rejected_requests']} "
                       f"rejected request(s) in stage(s) {', '.join(p['stages'])}; those items were treated as 'no answer'. "
                       f"To ask them again: clustering-harness reset {a.spec} --from-stage {p['stages'][0]}", file=sys.stderr)
-        print(json.dumps({"spend": ledger.summary()}, indent=1))
+        print(json.dumps({"spend_this_run_usd": {k: round(m.stats.get("usd", 0.0), 4) for k, m in pipe.llms.items()},
+                          "ledger_total": ledger.summary()}, indent=1))
         return 0
     if a.cmd == "multirun":
         from .multirun import run_seeds

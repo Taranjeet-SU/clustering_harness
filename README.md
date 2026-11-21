@@ -100,7 +100,9 @@ clustering-harness compare examples/banking77.yaml --baselines kmeans:k=77 agglo
 
 This reruns nothing: every model answer is cached, so it only adds the baselines. It writes
 `runs/banking77/output/comparison.csv`, with one row per partition. `pipeline_clusters` is the pipeline row of
-the Validation table. Add `--judge --judge-max-clusters 40` for the LLM-judge column (about $0.15 with `gpt-4o-mini`). Baseline names
+the Validation table. Add `--judge --judge-max-clusters 40` for the LLM-judge column (about $0.15 with `gpt-4o-mini`). Its scores are
+cached in `<workdir>/cache/judge.jsonl`, keyed by the judge model, its settings and the prompts, so changing a
+model asks again; failed judgments are not stored. Baseline names
 and options are checked before anything runs.
 
 **Now with your own data.** Create a starter spec, edit the marked lines and run it:
@@ -133,7 +135,9 @@ label_embedder: {backend: st, model: BAAI/bge-large-en-v1.5}
 ```
 
 Paths: input files (`data.path`, a prompt YAML) are looked up in the current folder first, then next to the
-spec. Outputs (`workdir`, `ledger`) are relative to the folder you run the command from. Unknown keys and
+spec. Outputs (`workdir`, `ledger`) are relative to the folder you run the command from: running the same spec
+from another folder starts a new workdir (a warning says so when one exists next to the spec); use absolute
+paths to avoid that. Unknown keys and
 misspelled presets are errors, with the closest valid name suggested.
 
 The same in Python:
@@ -255,7 +259,10 @@ models:
 ```
 
 **Where keys go.** Each key is read from the variable named for that model and sent only to that model's
-server. `OPENAI_API_KEY` is used by default only for OpenAI itself; an `openai_compatible` server gets no key
+server, which is the spec's `base_url` or the provider's official address. `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL`
+in the environment are ignored, so they cannot redirect a key or make another server's answers look like
+OpenAI's; set `base_url:` in the spec instead (it then becomes part of the model id). The key is sent to
+`api.openai.com` only over https. `OPENAI_API_KEY` is used by default only for OpenAI itself; an `openai_compatible` server gets no key
 unless you set `api_key_env`. If a named variable (`api_key_env`, `GEMINI_API_KEY`, `AZURE_OPENAI_API_KEY`,
 `ANTHROPIC_API_KEY`) is not set, the model is refused before any request, instead of silently using another key.
 
@@ -364,7 +371,7 @@ the run warns about it.
 
 | backend | example | notes |
 |---|---|---|
-| `hf` | `{backend: hf, model: Alibaba-NLP/gte-large-en-v1.5}` | any Hugging Face encoder; runs on CPU by default. `trust_remote_code` is on by default because the GTE models ship their own model code; it runs code from the model's Hugging Face repository, so set `trust_remote_code: false` for models that don't need it |
+| `hf` | `{backend: hf, model: Alibaba-NLP/gte-large-en-v1.5}` | any Hugging Face encoder; runs on CPU by default. `trust_remote_code` is on by default because the GTE models ship their own model code; it runs code from the model's Hugging Face repository, so set `trust_remote_code: false` for models that don't need it, or pin what runs with `revision:` (model) and `code_revision:` (its code) set to commit hashes. The first run downloads the model (about 1.7 GB for gte-large, 1.3 GB for bge-large) to the Hugging Face cache, which can take minutes; later runs reuse it |
 | `st` | `{backend: st, model: BAAI/bge-large-en-v1.5}` | sentence-transformers models |
 | `openai` | `{backend: openai, model: text-embedding-3-large}` | hosted |
 | `ollama` | `{backend: ollama, model: bge-m3}` | local server |
@@ -427,7 +434,7 @@ Everything lands in `<workdir>/output/`:
 | file | what's inside |
 |---|---|
 | `report_lines.csv` | the short list: `line_id`, `line_name`, `criterion` (the rule), `tickets`, `n_clusters`, `judge_score`, `round_formed` (the merge round that formed the line; -1 = a single cluster kept as is), `cluster_ids`, `cluster_names` |
-| `clusters.csv` | per cluster: `cluster_name`, `inclusion_criterion` / `exclusion_criterion`, `case_count`, duplicate-text counts, geometry (`cosine_silhouette_mean`, centroid cosines, `nearest_cluster_id`, ...: how tight and separate it is), quality scores 1–5 (`semantic_score_1_to_5` and per judge, `label_fit`, `distinction`, `judge_disagreement`), `example_case_ids`, `suspicious_sample_ids`, `semantic_reasons`, and `quality_status`: `MODEL_REVIEW_PASSED` when both judges accepted every sampled panel with scores of at least 4 and no suspicious records were found, otherwise `REVIEW_RECOMMENDED` (a person should look at it) |
+| `clusters.csv` | per cluster: `cluster_name`, `inclusion_criterion` / `exclusion_criterion`, `case_count`, duplicate-text counts, geometry (`cosine_silhouette_mean`, centroid cosines, `nearest_cluster_id`, ...: how tight and separate it is), quality scores 1–5 (`semantic_score_1_to_5`, `judge_a_semantic_score` / `judge_b_semantic_score`, `label_fit_score_1_to_5`, `distinction_score_1_to_5`, `judge_disagreement`), `example_case_ids`, `suspicious_sample_ids`, `semantic_reasons`, and `quality_status`: `MODEL_REVIEW_PASSED` when both judges accepted every sampled panel with scores of at least 4 and no suspicious records were found, otherwise `REVIEW_RECOMMENDED` (a person should look at it) |
 | `assignments.csv` | per record: `ticket_id`, `title`, `cluster_id` / `cluster_name`, `line_id` / `line_name`, `status` (`cluster` / `unassigned` / `junk`), `placement` (how it got its cluster, below), `reason` (why it was *not* clustered: `junk` = removed up front by the junk rule; `LLM junk: ...` = a model judged the record unusable while filing left-overs, with its reason; `not placed` = no cluster fitted; empty for clustered records) and `previous_reason` (the reason before the refile pass) |
 | `summary.json` | coverage, mean scores, model usage, and `model_problems` (answers that stayed unparseable and requests the provider rejected, per slot; also printed as a warning) |
 
