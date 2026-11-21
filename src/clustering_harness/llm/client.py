@@ -24,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Sequence
 
 from .backends import OfflineCallError
-from .base import BackendConfigError, ModelUnavailableError, Backend, BackendError, ChatRequest
+from .base import BackendConfigError, ModelUnavailableError, Backend, BackendError, ChatRequest, RequestRejectedError
 import logging
 from .budget import Budget, Ledger, Price, price_for
 from .cache import ResponseCache, request_key
@@ -92,10 +92,14 @@ class LLM:
             if ledger is None:
                 ledger = Ledger(":memory:")      # a cap must always be enforced; this one counts this object's calls
             if price is None and self.price.input_per_mtok == 0 and self.price.output_per_mtok == 0 \
-                    and not backend.model_id.startswith(("ollama:", "offline", "callable")):
+                    and not backend.model_id.startswith(("ollama:", "offline")):
                 raise ValueError(f"{self.name}: budget_usd={budget_usd} cannot be enforced because the price of "
                                  f"{backend.model_id} is unknown. Set price_in and price_out (USD per million tokens) "
                                  f"for this model in the run spec (or price=Price(in, out); 0 and 0 for a free model)")
+        if budget_usd is None and price is None and self.price.input_per_mtok == 0 and self.price.output_per_mtok == 0 \
+                and backend.model_id.startswith(("openai:", "azure-openai:", "anthropic:", "bedrock:")):
+            log.warning("%s: no price is known for %s, so its spend is recorded as $0; set price_in / price_out to track it",
+                        name or backend.model_id, backend.model_id)
         self.ledger = ledger
         self.budget_scope = budget_scope or backend.model_id
         self.budget = Budget(budget_usd, ledger, self.budget_scope) if budget_usd is not None else None
@@ -113,6 +117,7 @@ class LLM:
         self.cache_contract_failures = cache_contract_failures
         self.legacy_cache_keys = legacy_cache_keys
         self.stats["contract_failures"] = 0
+        self.stats["rejected"] = 0
 
     @property
     def settings(self) -> dict:
@@ -147,13 +152,25 @@ class LLM:
             with self._stats_lock:
                 self.budget.check(self._inflight_usd, estimate)
                 self._inflight_usd += estimate
+        # backends whose SDK already retries (with backoff) get one attempt here, so retries do not multiply
+        attempts = 1 if getattr(self.backend, "retries_internally", False) else self.transport_retries
         try:
-            for attempt in range(self.transport_retries):
+            for attempt in range(attempts):
                 try:
                     with self._sem:
                         res = self.backend.complete(req)
                 except OfflineCallError:
                     raise
+                except RequestRejectedError as e:
+                    # this request would be refused again: no retry, no blocking; counted and reported
+                    with self._stats_lock:
+                        self.stats["rejected"] += 1
+                        self._last_error = redact(e)[:300]
+                        n = self.stats["rejected"]
+                    if n <= 3 or n % 50 == 0:
+                        log.warning("%s: request rejected by the provider (%d so far): %s", self.name, n, redact(e)[:300])
+                    self._local.rejected = True
+                    break
                 except BackendConfigError as e:
                     msg = redact(e)
                     log.error("%s (%s): %s", self.name, self.model_id, msg)
@@ -167,7 +184,7 @@ class LLM:
                         n = self.stats["failures"]
                     if n <= 3 or n % 50 == 0:
                         log.warning("%s: request failed (attempt %d/%d, %d failures so far): %s", self.name, attempt + 1,
-                                    self.transport_retries, n, redact(e)[:300])
+                                    attempts, n, redact(e)[:300])
                     continue
                 with self._stats_lock:
                     self.stats["requests"] += 1
@@ -189,8 +206,9 @@ class LLM:
             if estimate:
                 with self._stats_lock:
                     self._inflight_usd -= estimate
-        # every attempt failed: mark the call so that it is not cached, and give up if the model looks down
-        self._local.failed = True
+        # every attempt failed (or the request was rejected): not cached; give up if the model looks down
+        if not getattr(self._local, "rejected", False):
+            self._local.failed = True
         with self._stats_lock:
             self._consecutive_failures += 1
             streak = self._consecutive_failures
@@ -202,6 +220,8 @@ class LLM:
 
     def chat_json(self, messages: list, max_tokens: int = 800, temperature: float = 0.0, seed: int = 0, stage: str = "") -> dict:
         raw = self.chat(messages, max_tokens, temperature, seed, json_mode=True, stage=stage)
+        if getattr(self._local, "failed", False) or getattr(self._local, "rejected", False):
+            return {"_error": "no answer", "_raw": ""}       # no repair request for a request that got no answer
         for attempt in range(2):
             try:
                 return extract_json(raw)
@@ -227,9 +247,11 @@ class LLM:
         t0 = time.time()
         n_calls = 1
         self._local.failed = False
+        self._local.rejected = False
         if as_json:
             out = self.chat_json(messages, max_tokens, temperature, seed, stage=stage)
-            if "_error" in out and self.reasoning and not out.get("_raw") and max_tokens < 2400:
+            if "_error" in out and self.reasoning and not out.get("_raw") and max_tokens < 2400 \
+                    and not self._local.failed and not self._local.rejected:
                 n_calls += 1
                 out = self.chat_json(messages, min(4000, max(2400, int(max_tokens * 2.5))), temperature, seed, stage=stage)
         else:
@@ -242,6 +264,11 @@ class LLM:
             out.setdefault("_error", "request failed")
             out["_transport_error"] = self._last_error or "request failed"
             return out
+        if getattr(self._local, "rejected", False):
+            out = dict(out)
+            out["_error"] = "request rejected"
+            out["_rejected"] = self._last_error or "rejected"
+            return out                                     # not cached: a rerun may succeed (e.g. after a prompt fix)
         if "_error" in out:
             with self._stats_lock:
                 self.stats["contract_failures"] += 1
@@ -261,12 +288,13 @@ class LLM:
         saved = self.transport_retries
         self.transport_retries = 1
         self._local.failed = False
+        self._local.rejected = False
         try:
             text = self.chat([{"role": "user", "content": 'Reply with the JSON object {"ok": true}.'}], max_tokens=400,
                              json_mode=True, stage="preflight")
         finally:
             self.transport_retries = saved
-        if getattr(self._local, "failed", False):
+        if getattr(self._local, "failed", False) or getattr(self._local, "rejected", False):
             self._give_up(f"{self.name} ({self.model_id}) did not answer a test request: {self._last_error}. Check the "
                           f"model name, key, server and network, then rerun.")
         log.info("%s (%s): test request answered (%d chars)", self.name, self.model_id, len(text or ""))

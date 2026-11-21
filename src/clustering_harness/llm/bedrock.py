@@ -35,7 +35,7 @@ import threading
 import time
 from typing import Callable
 
-from .base import BackendConfigError, BackendError, ChatRequest, ChatResult
+from .base import BackendConfigError, BackendError, ChatRequest, ChatResult, RequestRejectedError
 
 __all__ = ["BedrockBackend", "resolve_callable"]
 
@@ -95,6 +95,9 @@ def _to_epoch(x) -> float | None:
 
 class BedrockBackend:
     """Chat through ``bedrock-runtime`` ``Converse``. Thread-safe; clients are rebuilt when credentials expire."""
+
+    #: the SDK retries transient errors with backoff, so LLM does not add its own retries
+    retries_internally = True
 
     def __init__(self, model: str, region: str | None = None, credentials: dict | None = None,
                  credentials_provider: Callable[[], dict] | str | None = None,
@@ -263,7 +266,9 @@ class BedrockBackend:
                     continue
                 bad_model = code == "ValidationException" and any(
                     t in str(e).lower() for t in ("model identifier", "model id", "on-demand throughput", "inference profile"))
-                err = BackendConfigError if (code in _FATAL or bad_model) else BackendError
+                status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+                err = (BackendConfigError if (code in _FATAL or bad_model) else
+                       RequestRejectedError if (code == "ValidationException" or status in (400, 413, 422)) else BackendError)
                 raise err(f"bedrock {self.model}: {code}: {str(e)[:300]}") from e
             except (NoCredentialsError, PartialCredentialsError) as e:
                 raise BackendConfigError(f"bedrock: {e} (no AWS credentials found: set credentials, a profile, a role or a "

@@ -16,7 +16,7 @@ larger budgets and text-mode judging.
 
 * Each record has a unique string id, an optional title and a text (description). Ids are never used as
   clustering content.
-* A description is **empty** if it has fewer than `junk.min_desc_alnum` (3) ASCII letters/digits or equals the
+* A description is **empty** if it has fewer than `junk.min_desc_alnum` (3) letters/digits (any script; a CJK character counts as 3) or equals the
   title (case- and whitespace-insensitive).
 * A record is **junk** if its title matches `junk.placeholder_title` *and* its description is empty, or if
   title + description contain fewer than `junk.min_alnum` (12) letters/digits. Junk records are kept in every

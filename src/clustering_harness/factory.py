@@ -89,6 +89,27 @@ def _load_entry_points():
         _BACKENDS.setdefault(ep.name, ep.load())
 
 
+WRAPPER_OPTIONS = ("reasoning", "concurrency", "budget_usd", "price_in", "price_out", "cache_contract_failures",
+                   "legacy_cache_keys", "max_consecutive_failures", "budget_scope", "name")
+
+
+def _known_options() -> list:
+    """Every option name accepted by a built-in backend factory or the LLM wrapper (for typo suggestions)."""
+    import inspect
+    from .llm.bedrock import BedrockBackend
+    names = set(WRAPPER_OPTIONS) | {"model", "url", "num_ctx", "think", "keep_alive", "json_mode", "seed", "deployment",
+                                     "model_id", "backend"}
+    for cls in (OllamaBackend, OpenAICompatibleBackend, AnthropicBackend, BedrockBackend):
+        names |= {p for p in inspect.signature(cls.__init__).parameters if p != "self" and not p.startswith("_")}
+    return sorted(names)
+
+
+def _hints(keys, allowed) -> str:
+    import difflib
+    return "; ".join(f"{k!r}" + (f" (did you mean {m[0]!r}?)" if (m := difflib.get_close_matches(str(k), allowed, 1)) else "")
+                     for k in sorted(keys))
+
+
 def build_backend(spec: dict):
     """A backend from a spec dict. ``backend`` is a built-in kind (see :func:`backend_kinds`), a kind added with
     :func:`register_backend` or an entry point, or an import path ``"package.module:attr"`` naming a Backend class
@@ -99,7 +120,7 @@ def build_backend(spec: dict):
     if kind in _BACKENDS:
         be = _BACKENDS[kind](s)
         if s:
-            raise ValueError(f"unknown options for backend {kind!r}: {sorted(s)}")
+            raise ValueError(f"unknown option(s) for backend {kind!r}: {_hints(s, _known_options())}")
     elif ":" in str(kind):
         from .llm.bedrock import resolve_callable
         be = resolve_callable(kind)(**s)

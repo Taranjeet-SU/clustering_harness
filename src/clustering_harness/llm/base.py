@@ -6,7 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-__all__ = ["ChatRequest", "ChatResult", "Backend", "BackendError", "BackendConfigError", "ModelUnavailableError"]
+__all__ = ["ChatRequest", "ChatResult", "Backend", "BackendError", "BackendConfigError", "RequestRejectedError",
+           "ModelUnavailableError"]
 
 
 class BackendError(RuntimeError):
@@ -16,6 +17,12 @@ class BackendError(RuntimeError):
 class BackendConfigError(BackendError):
     """A failure that retrying cannot fix: missing or invalid credentials, no permission, unknown model,
     missing region. Backends raise it so that a run stops at once with the provider's message."""
+
+
+class RequestRejectedError(BackendError):
+    """The provider refused *this request* and would refuse it again (HTTP 400/413/422: input too long, content
+    filter, invalid request). It is not retried and does not block the run: the algorithm gets an error answer for
+    that one request, it is counted (``LLM.stats["rejected"]``) and reported. Many in a row still stop the model."""
 
 
 class ModelUnavailableError(BackendError):

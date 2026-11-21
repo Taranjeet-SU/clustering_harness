@@ -234,7 +234,7 @@ def test_import_path_backend_and_registry():
     register_backend("echo_test", lambda s: EchoBackend(s.pop("model"), s.pop("prefix", ">")))
     assert "echo_test" in backend_kinds()
     assert build_backend({"backend": "echo_test", "model": "y"}).model_id == "echo:y"
-    with pytest.raises(ValueError, match="unknown options"):
+    with pytest.raises(ValueError, match=r"unknown option\(s\)"):
         build_backend({"backend": "echo_test", "model": "y", "bogus": 1})
     with pytest.raises(ValueError, match="unknown backend"):
         build_backend({"backend": "nope"})

@@ -165,7 +165,7 @@ result.summary       # coverage, scores, model usage
 | **embedding** | a list of numbers that represents a text's meaning; similar texts get similar vectors. The *embedder* computes them. |
 | **cluster** | a group of records the models agree is *one recurring problem or request*. It has a name, an inclusion rule ("cases where...") and an exclusion rule. |
 | **report line** | one or more clusters merged when they belong on one line of a "top issues" report. |
-| **unassigned / junk** | *unassigned*: a real record that fits no cluster (rare, one-off issues). *junk*: empty or test records, removed up front. |
+| **unassigned / junk** | *unassigned*: a real record that fits no cluster (rare, one-off issues). *junk*: records with no usable content, removed up front: a placeholder title (`test`, `new case`, ...) with an empty description, or fewer than 12 letters/digits in title and description together (any script; a Chinese/Japanese/Korean character counts as 3). Short queries such as "I lost my card" (11) count as junk; for one-line queries set `pipeline.junk.min_alnum: 5` or lower. |
 | **model slots `a` and `b`** | the pipeline uses two LLMs. Each has jobs (`a` sorts leftover records, `b` names clusters, ...) and **both act as judges**, so a decision needs two opinions. Using two *different* models makes the judging stricter. |
 | **gate / judge** | a judge scores 1–5 whether a group is one report line. The gate combines both judges' scores to accept, split or reject a group. |
 | **domain** | a few words about whose tickets these are (product name and description). They are inserted into every prompt. See section 7. |
@@ -311,15 +311,23 @@ class GatewayBackend:
         # text length (about 3 characters per token) so that budgets still hold
         return ChatResult(text=text, input_tokens=0, output_tokens=0)
 
+# from Python (before you build models in the same process):
 register_backend("gateway", lambda opts: GatewayBackend(opts.pop("model"), opts.pop("timeout", 60)))
-# or in your package's pyproject.toml:  [project.entry-points."clustering_harness.backends"]  gateway = "my_company.llm:make"
+# for YAML specs and the command line, use the import path above, or publish the short name from your package:
+#   [project.entry-points."clustering_harness.backends"]   gateway = "my_company.llm:make"
 ```
+
+`register_backend` only affects the Python process that calls it, so `backend: gateway` in a YAML spec works
+only through the entry point (or when you build the pipeline from Python after registering).
 
 An import path only works if Python can import the module. The command line adds the current folder and the
 folder of the run spec, so a `my_backend.py` next to `run.yaml` just works. Anything else must be installed
 (`pip install -e path/to/your/package`) or on `PYTHONPATH`.
 
-**When a model fails.** Every failed request is logged. If any request of a stage still failed after its
+**When a model fails.** Every failed request is logged. Requests the provider refuses as invalid (HTTP
+400/413/422: input too long, content filter) are not retried and do not stop the run: that one item is treated
+as "no answer", counted in `summary.json` (`model_problems`) and reported as a warning; many in a row stop the
+model like other failures. If any other request of a stage still failed after its
 retries, the stage is **not saved**: its files are removed and the run stops with `IncompleteStageError`. Rerun
 the same command when the server is healthy. Answers that did arrive are cached, so only the failed requests
 are sent again. A run that finishes therefore never contains results built from failed requests.
@@ -332,7 +340,7 @@ stops the run with the provider's message, and so do 8 failed requests in a row 
 Once a model is marked unusable, requests already queued for it fail immediately instead of being sent, and
 unstarted jobs are dropped. Requests already in flight finish first, so a few may still go out.
 `timeout` and `max_retries` can be set per model (`openai`/`anthropic`/`bedrock`) to decide how long a dead
-server is retried.
+server is retried; those SDKs retry with backoff themselves, so the package adds no retries of its own on top.
 
 **What the cache key covers.** The model id, the messages, `max_tokens`, seed, JSON mode, temperature, and
 model settings that change answers without changing the request (`reasoning`, Ollama `think`/`num_ctx`,
@@ -410,10 +418,19 @@ Everything lands in `<workdir>/output/`:
 
 | file | what's inside |
 |---|---|
-| `report_lines.csv` | the short list: line name, rule, number of records, member clusters, judge score |
-| `clusters.csv` | per cluster: name, inclusion and exclusion rule, size, geometry (how tight and separate it is), two-model quality scores (1–5), example and suspicious record ids, `quality_status` (`MODEL_REVIEW_PASSED` or `REVIEW_RECOMMENDED`) |
-| `assignments.csv` | per record: `status` (`cluster` / `unassigned` / `junk`), cluster and line, `placement` (which stage placed it) and `reason`: why a record was *not* clustered (junk or not placed); it is empty for clustered records |
-| `summary.json` | coverage, mean scores, model usage |
+| `report_lines.csv` | the short list: `line_id`, `line_name`, `criterion` (the rule), `tickets`, `n_clusters`, `judge_score`, `round_formed`, `cluster_ids`, `cluster_names` |
+| `clusters.csv` | per cluster: `cluster_name`, `inclusion_criterion` / `exclusion_criterion`, `case_count`, duplicate-text counts, geometry (`cosine_silhouette_mean`, centroid cosines, `nearest_cluster_id`, ...: how tight and separate it is), quality scores 1–5 (`semantic_score_1_to_5` and per judge, `label_fit`, `distinction`, `judge_disagreement`), `example_case_ids`, `suspicious_sample_ids`, `semantic_reasons`, and `quality_status` (`MODEL_REVIEW_PASSED` or `REVIEW_RECOMMENDED`) |
+| `assignments.csv` | per record: `ticket_id`, `title`, `cluster_id` / `cluster_name`, `line_id` / `line_name`, `status` (`cluster` / `unassigned` / `junk`), `placement` (how it got its cluster, below), `reason` (why it was *not* clustered: `junk`, `not placed`, `LLM junk: ...`; empty for clustered records) and `previous_reason` (the reason before the refile pass) |
+| `summary.json` | coverage, mean scores, model usage, and `model_problems` (answers that stayed unparseable and requests the provider rejected, per slot; also printed as a warning) |
+
+`placement` values: `cascade_B` (placed by the clustering cascade), `filed_existing_confirmed` (filed into an
+existing cluster by a model and confirmed), `reassigned` (moved to a better-fitting cluster), `new_cluster`
+(member of a cluster proposed by a model for left-over records), `refiled_...` (the same, during the second,
+refile pass); empty for unassigned and junk records.
+
+**What the models see.** Titles and description snippets placed in prompts are masked first: URLs, e-mail
+addresses, IP addresses, phone numbers and host names are replaced (plus `pipeline.masking.names`). Embeddings
+use the original text. Turn masking off with `pipeline.masking.enabled: false`.
 
 `<workdir>/manifest.json` records the dataset, the configuration fingerprint, the models, the embedder
 settings (device, precision) and the library versions. Intermediate results (bank partitions, stage logs,
@@ -430,7 +447,8 @@ records ─ junk rule ─ embeddings ─┬─ consensus bank (151 partitions: U
 
 In plain words:
 
-1. **Clean.** Empty and test records are set aside as junk.
+1. **Clean.** Records with no usable content (placeholder titles, fewer than 12 letters/digits) are set aside
+   as junk (see "unassigned / junk" in the glossary).
 2. **Propose.** Records are embedded and clustered many ways (151 alternative partitions). One of them is
    the starting point, and the others show which records reliably belong together.
 3. **Check.** Both models judge sampled records of each cluster. Clusters that are one issue are
@@ -442,7 +460,8 @@ In plain words:
 6. **Roll up.** Clusters a support lead would report together are merged into report lines, guarded by a
    judge so that quality does not drop. Merging only happens while there are more than `rollup.target_max`
    (default 150) clusters; at or below that, each cluster is its own line (as on BANKING77, about 135
-   clusters). Lower `pipeline.rollup.target_max` for a shorter list.
+   clusters). Lowering `pipeline.rollup.target_max` lets the rollup try to merge further, but every merge
+   still needs the judge's approval, so distinct clusters stay separate lines.
 
 Every stage, threshold and config field is specified in [docs/algorithm.md](docs/algorithm.md). Backends and
 budgets: [docs/backends.md](docs/backends.md). Metrics: [docs/evaluation.md](docs/evaluation.md).
@@ -472,7 +491,7 @@ table = compare_partitions({"pipeline": result.labels(), "kmeans": run_baseline(
 | symptom | fix |
 |---|---|
 | `CUDA out of memory` while embedding | the embedder uses the CPU unless you set `device: cuda`; remove it, or free the GPU |
-| `... holds a run with a different ...` | a workdir belongs to one dataset, configuration, prompt set (file contents and domain), model pair with its settings, and embedder with its options (all checked; settings that cannot change results, like `bank.workers`, are not). Run `clustering-harness reset run.yaml` to start over in the same workdir: it keeps the paid model answers, so unchanged requests cost nothing. `reset --from-stage rollup` keeps the earlier stages, for changes that only affect later ones |
+| `... holds a run made with different settings` | a workdir belongs to one dataset, configuration, prompt set (file contents and domain), model pair with its settings, and embedder with its options (all checked; settings that cannot change results, like `bank.workers`, are not). The message names each changed setting and the first stage that depends on it. `clustering-harness reset run.yaml --from-stage <that stage>` keeps the earlier stages (a change that a kept stage depends on is still refused); `clustering-harness reset run.yaml` starts over. Both keep the paid model answers, so unchanged requests cost nothing |
 | `IncompleteStageError: stage ... request(s) failed` | the model server failed some requests; nothing from that stage was saved. Rerun when it is healthy: only the failed requests are sent again |
 | `ModelUnavailableError: ... cannot be used` | the provider rejected the settings (key, permission, model name, region); fix them and rerun. Nothing failed was cached |
 | `ModelUnavailableError: ... requests in a row failed` | the server is down, unreachable or rate-limiting; the log shows each error. Rerun when it's back |

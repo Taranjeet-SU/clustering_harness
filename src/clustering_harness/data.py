@@ -25,9 +25,15 @@ import pandas as pd
 __all__ = ["Dataset", "JunkRule", "TextTemplate", "alnum_count", "one_line"]
 
 
+_CJK = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff]")
+
+
 def alnum_count(s: str | None) -> int:
-    """Number of ASCII letters and digits in ``s``."""
-    return len(re.sub(r"[^A-Za-z0-9]", "", s or ""))
+    """Letters and digits in ``s``, in any script. A Chinese/Japanese/Korean character counts as 3, roughly one
+    word, because those scripts write a word in one or two characters. For ASCII text this equals the number of
+    ASCII letters and digits."""
+    s = s or ""
+    return sum(1 for c in s if c.isalnum()) + 2 * len(_CJK.findall(s))
 
 
 def one_line(s: str | None, n: int) -> str:
@@ -40,7 +46,8 @@ class JunkRule:
     """Rule-based quarantine of records with no usable content (evaluated before any clustering).
 
     A record is junk when its title matches ``placeholder_title`` and its description is empty, or when the
-    title and description together have fewer than ``min_alnum`` letters/digits. A description is *empty*
+    title and description together have fewer than ``min_alnum`` letters/digits (any script; see
+    :func:`alnum_count`). For very short texts such as one-line queries, lower ``min_alnum``. A description is *empty*
     when it has fewer than ``min_desc_alnum`` letters/digits or repeats the title.
     """
 

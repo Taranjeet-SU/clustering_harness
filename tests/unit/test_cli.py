@@ -114,3 +114,18 @@ def test_reset_command_keeps_model_answers(tmp_path, capsys):
     assert main(["reset", s]) == 0
     assert sorted(str(p.relative_to(wd)) for p in wd.rglob("*") if p.is_file()) == ["cache/labels/l.npy", "cache/llm.sqlite",
                                                                                    "spend.sqlite"]
+
+
+def test_misspelled_model_option_gets_a_suggestion(tmp_path, capsys):
+    (tmp_path / "d.csv").write_text("id,text\n1,a\n")
+    s = _spec(tmp_path, "workdir: w\ndata: {path: d.csv}\nmodels: {a: {backend: openai, model: gpt-4o-mini, budget_usdd: 1}, "
+                        "b: {backend: offline, model_id: y}}\n")
+    assert main(["run", s]) == 2
+    assert "'budget_usdd' (did you mean 'budget_usd'?)" in capsys.readouterr().err
+
+
+def test_evaluate_fails_when_no_ids_match(tmp_path, capsys):
+    (tmp_path / "a.csv").write_text("ticket_id,cluster_id\nx1,c1\nx2,c2\n")
+    (tmp_path / "g.csv").write_text("id,label\n1,a\n2,b\n")
+    assert main(["evaluate", "--assignments", str(tmp_path / "a.csv"), "--gold", str(tmp_path / "g.csv")]) == 2
+    assert "no record ids match" in capsys.readouterr().err

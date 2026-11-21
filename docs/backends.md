@@ -104,7 +104,15 @@ A backend that reports 0 input and 0 output tokens is charged an estimate (about
 errs high) when its model has a price, so budgets still hold.
 
 A stage during which any request failed after its retries is not saved (`IncompleteStageError`); the answers
-that arrived are cached, so a rerun sends only the failed requests again. `timeout` and `max_retries` are spec options for `openai`,
+that arrived are cached, so a rerun sends only the failed requests again.
+
+Error classes raised by backends: `BackendError` (transient: retried, and a stage with such a failure is not
+saved), `BackendConfigError` (the model cannot be used: stops the run), and `RequestRejectedError` (HTTP
+400/413/422, this request would be refused again: not retried, not cached, counted in `LLM.stats["rejected"]` and
+`summary.json` `model_problems`, and the run continues; `max_consecutive_failures` rejections in a row still stop
+the model). Backends whose SDK retries with backoff (`OpenAICompatibleBackend`, `AnthropicBackend`,
+`BedrockBackend`) set `retries_internally = True` and get one attempt from `LLM`; others get `transport_retries`
+(default 2). A request that got no answer gets no JSON-repair request. `timeout` and `max_retries` are spec options for `openai`,
 `openai_compatible`, `azure_openai`, `gemini`, `anthropic` and `bedrock`. Bedrock's "invalid model identifier"
 error is a configuration error.
 

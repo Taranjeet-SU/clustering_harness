@@ -238,12 +238,16 @@ class PipelineConfig(_M):
     #: settings that do not change results; left out of :meth:`fingerprint` so changing them keeps a workdir usable
     NON_RESULT_FIELDS: ClassVar[tuple] = (("bank", "workers"), ("scoring", "concurrency"), ("gate", "allow_constant_judge"))
 
-    def fingerprint(self) -> str:
-        """Hash of every setting that can change results (see ``NON_RESULT_FIELDS`` for the exceptions)."""
+    def result_settings(self) -> dict:
+        """Every setting that can change results, by section (``NON_RESULT_FIELDS`` removed)."""
         d = self.model_dump(mode="json")
         for sect, key in self.NON_RESULT_FIELDS:
             d.get(sect, {}).pop(key, None)
-        return hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest()[:16]
+        return d
+
+    def fingerprint(self) -> str:
+        """Hash of every setting that can change results (see ``NON_RESULT_FIELDS`` for the exceptions)."""
+        return hashlib.sha256(json.dumps(self.result_settings(), sort_keys=True).encode()).hexdigest()[:16]
 
 
 def _deep_merge(a: dict, b: dict) -> dict:

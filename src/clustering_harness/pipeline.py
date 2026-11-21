@@ -52,22 +52,75 @@ def reset_workdir(workdir: str | Path, from_stage: str | None = None) -> list[st
 
     Without ``from_stage`` every stage is removed together with the manifest, so the next run may use new
     data, settings, prompts or models; requests whose prompt did not change are still answered from the cache.
-    With ``from_stage`` that stage and all later ones are removed and the earlier ones are kept; the manifest
-    is removed too, so only do this when your change cannot affect the kept stages. Returns removed paths."""
+    With ``from_stage`` that stage and all later ones are removed and the earlier ones are kept. The manifest is
+    kept, so the next run still refuses changes that a kept stage depends on (see :data:`STAGE_DEPENDS`).
+    Returns removed paths."""
     import shutil
     wd = Path(workdir)
     if from_stage is not None and from_stage not in STAGES:
         raise ValueError(f"unknown stage {from_stage!r}; stages are: {', '.join(STAGES)}")
     stages = STAGES[STAGES.index(from_stage):] if from_stage else STAGES
-    pats = [p for st in stages for p in STAGE_FILES[st]] + ["manifest.json", "config.yaml", "progress.json"]
+    pats = [p for st in stages for p in STAGE_FILES[st]] + ["progress.json"]
     if from_stage is None:
-        pats.append("cache/judge.jsonl")
+        pats += ["manifest.json", "config.yaml", "cache/judge.jsonl"]
     removed = []
     for pat in pats:
         for p in sorted(wd.glob(pat)):
             shutil.rmtree(p) if p.is_dir() else p.unlink()
             removed.append(str(p.relative_to(wd)))
     return removed
+
+
+#: what each stage's saved output depends on (manifest keys; ``config.<section>`` for pipeline settings). A change is
+#: accepted once every saved stage from the earliest dependent stage on has been removed (``reset --from-stage``).
+STAGE_DEPENDS = {
+    "embed": ("records", "data_fingerprint", "embedder", "embedder_options", "vectors_fingerprint", "config.text"),
+    "bank": ("config.bank", "config.base", "config.junk"),
+    "cascade": ("models", "model_settings", "prompts_fingerprint", "label_embedder", "label_embedder_options",
+                "config.gate", "config.cascade", "config.masking", "config.roles", "config.prompts", "config.domain"),
+    "residual": ("config.residual",),
+    "refile": (),
+    "scoring": ("config.scoring",),
+    "rollup": ("config.rollup",),
+    "export": (),
+}
+_LABELS = {"data_fingerprint": "data (record ids, titles or texts)", "prompts_fingerprint": "prompts (file contents or domain)",
+           "vectors_fingerprint": "precomputed vectors"}
+
+
+def _stage_of(key: str) -> int:
+    for i, st in enumerate(STAGES):
+        if key in STAGE_DEPENDS[st]:
+            return i
+    return 0          # unknown keys are treated as affecting everything
+
+
+def _short(v, n: int = 80) -> str:
+    t = json.dumps(v, default=str, sort_keys=True)
+    return t if len(t) <= n else t[:n - 3] + "..."
+
+
+def _manifest_changes(prev: dict, new: dict) -> list:
+    """[(key, human-readable description)] of guarded differences between two manifests."""
+    out = []
+    for k in ("records", "data_fingerprint", "models", "model_settings", "prompts_fingerprint", "embedder",
+              "embedder_options", "label_embedder", "label_embedder_options", "vectors_fingerprint"):
+        if k in prev and prev[k] != new[k]:
+            out.append((k, _LABELS.get(k) or f"{k}: {_short(prev[k])} -> {_short(new[k])}"))
+    if "config" in prev:
+        for sect in sorted(set(prev["config"]) | set(new["config"])):
+            a, b = prev["config"].get(sect), new["config"].get(sect)
+            if a == b:
+                continue
+            if isinstance(a, dict) and isinstance(b, dict):
+                fields = [f"pipeline.{sect}.{f}: {_short(a.get(f), 40)} -> {_short(b.get(f), 40)}"
+                          for f in sorted(set(a) | set(b)) if a.get(f) != b.get(f)]
+            else:
+                fields = [f"pipeline.{sect}: {_short(a, 40)} -> {_short(b, 40)}"]
+            out.append((f"config.{sect}", "; ".join(fields)))
+    elif prev.get("config_fingerprint") not in (None, new["config_fingerprint"]):
+        out.append(("config", "pipeline settings (this workdir predates per-setting records)"))
+    return out
 
 
 class IncompleteStageError(RuntimeError):
@@ -245,6 +298,15 @@ class Pipeline:
         """See :func:`reset_workdir`."""
         return reset_workdir(self.workdir, from_stage)
 
+    def _model_problems(self) -> dict:
+        """Per slot: answers that stayed unparseable and requests the provider rejected (only slots with problems)."""
+        out = {}
+        for k, m in self.llms.items():
+            cf, rj = m.stats.get("contract_failures", 0), m.stats.get("rejected", 0)
+            if cf or rj:
+                out[k] = {"unparseable_answers": cf, "rejected_requests": rj, "requests": m.stats.get("requests", 0)}
+        return out
+
     # ------------------------------------------------------------------ failed-request guard
     def _unique_llms(self) -> list:
         out, seen = [], set()
@@ -303,6 +365,7 @@ class Pipeline:
         wd.mkdir(parents=True, exist_ok=True)
         manifest = {"dataset": ds.name, "records": len(ds), "data_fingerprint": _data_fingerprint(ds),
                     "config_fingerprint": self.cfg.fingerprint(),
+                    "config": self.cfg.result_settings(),
                     "models": {k: m.model_id for k, m in self.llms.items()},
                     "embedder": getattr(self.embedder, "name", "precomputed" if self.vectors is not None else None),
                     "label_embedder": getattr(self.label_embedder, "name", None),
@@ -316,15 +379,18 @@ class Pipeline:
         if old.exists():
             prev = json.loads(old.read_text())
             manifest["first_run_environment"] = prev.get("first_run_environment") or prev.get("environment")
-            changed = [k for k in ("records", "data_fingerprint", "config_fingerprint", "models", "model_settings",
-                                   "prompts_fingerprint", "embedder", "embedder_options", "label_embedder",
-                                   "label_embedder_options", "vectors_fingerprint")
-                       if k in prev and prev[k] != manifest[k]]
-            if changed:
-                raise ValueError(f"{wd} holds a run with a different {', '.join(changed)}; its saved stages would be "
-                                 f"mixed with the new settings. Start over in the same workdir with `clustering-harness "
-                                 f"reset <spec>` (keeps the paid model answers, so unchanged requests stay free), or use a "
-                                 f"new workdir.")
+            changes = _manifest_changes(prev, manifest)
+            if changes:
+                first = min(_stage_of(k) for k, _ in changes)
+                saved = [st for st in STAGES[first:] if any(any(wd.glob(p)) for p in STAGE_FILES[st])]
+                if saved:
+                    what = "\n  ".join(d for _, d in changes)
+                    raise ValueError(
+                        f"{wd} holds a run made with different settings:\n  {what}\nThe saved stage(s) {', '.join(saved)} "
+                        f"depend on them and would be mixed with the new settings. Rerun from the first affected stage with "
+                        f"`clustering-harness reset <spec> --from-stage {STAGES[first]}` (keeps earlier stages and the paid "
+                        f"model answers), start over with `clustering-harness reset <spec>`, or use a new workdir.")
+                log.info("settings changed (%s); no saved stage depends on them", ", ".join(k for k, _ in changes))
         manifest["first_run_environment"] = manifest.get("first_run_environment") or manifest["environment"]
         if self.preflight and until not in ("embed", "bank") and not (wd / "output" / "assignments.csv").exists():
             self._preflight()          # before the manifest is written, so a corrected model name is not refused
@@ -474,8 +540,13 @@ class Pipeline:
                    "semantic_size_weighted": float((score.semantic_score_1_to_5 * score.case_count).sum() / score.case_count.sum()) if len(score) else None,
                    "silhouette_size_weighted": float((score.cosine_silhouette_mean * score.case_count).sum() / score.case_count.sum()) if len(score) else None,
                    "llm_usage": {k: m.stats for k, m in self.llms.items()},
+                   "model_problems": self._model_problems(),
                    "wall_minutes_this_call": round((time.time() - T0) / 60, 1), "human_validated": False}
         write_json(summary, out_dir / "summary.json")
+        for slot, p in summary["model_problems"].items():
+            log.warning("model %s (%s): %d unparseable answer(s) and %d rejected request(s) out of %d requests in this "
+                        "call; the affected records/clusters were handled as 'no answer' (see docs/backends.md)",
+                        slot, self.llms[slot].model_id, p["unparseable_answers"], p["rejected_requests"], p["requests"])
         for c in {id(m.cache): m.cache for m in self.llms.values() if m.cache is not None}.values():
             c.checkpoint()
         logs = {k: ctx.load("results", *k.split("/"), default=None) for k in ("cascade_log.json", "residual/log.json", "refile/log.json", "rollup/log.json")}

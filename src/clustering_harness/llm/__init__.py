@@ -2,12 +2,13 @@
 from .backends import (AnthropicBackend, CallableBackend, OfflineBackend, OfflineCallError, OllamaBackend,
                        OpenAICompatibleBackend)
 from .bedrock import BedrockBackend
-from .base import Backend, BackendConfigError, BackendError, ChatRequest, ChatResult, ModelUnavailableError
+from .base import (Backend, BackendConfigError, BackendError, ChatRequest, ChatResult, ModelUnavailableError,
+                   RequestRejectedError)
 from .budget import PRICES_PER_MTOK, Budget, BudgetExceeded, Ledger, Price, price_for
 from .cache import ResponseCache, request_key
 from .client import LLM, extract_json, run_parallel
 
-__all__ = ["LLM", "run_parallel", "extract_json", "Backend", "BackendError", "BackendConfigError", "ModelUnavailableError", "ChatRequest", "ChatResult",
+__all__ = ["LLM", "run_parallel", "extract_json", "Backend", "BackendError", "BackendConfigError", "ModelUnavailableError", "RequestRejectedError", "ChatRequest", "ChatResult",
            "OllamaBackend", "OpenAICompatibleBackend", "AnthropicBackend", "BedrockBackend", "CallableBackend", "OfflineBackend",
            "OfflineCallError", "ResponseCache", "request_key", "Ledger", "Budget", "BudgetExceeded", "Price",
            "PRICES_PER_MTOK", "price_for"]

@@ -14,7 +14,7 @@ import os
 import threading
 from typing import Callable
 
-from .base import BackendConfigError, BackendError, ChatRequest, ChatResult
+from .base import BackendConfigError, BackendError, ChatRequest, ChatResult, RequestRejectedError
 
 __all__ = ["OllamaBackend", "OpenAICompatibleBackend", "AnthropicBackend", "CallableBackend", "OfflineBackend",
            "OfflineCallError"]
@@ -69,6 +69,8 @@ class OllamaBackend:
             r = self._http().post(self.url + "/api/chat", json=body, timeout=self.timeout)
         except Exception as e:  # noqa: BLE001 - connection problems are retryable
             raise BackendError(f"ollama {self.model} at {self.url}: {str(e)[:200]}") from e
+        if r.status_code in (400, 413, 422):
+            raise RequestRejectedError(f"ollama {self.model}: HTTP {r.status_code}: {r.text[:200]}")
         if r.status_code == 404:
             raise BackendConfigError(f"ollama: model {self.model!r} not found at {self.url} (run `ollama pull {self.model}`): "
                                      f"{r.text[:200]}")
@@ -96,6 +98,9 @@ class OpenAICompatibleBackend:
     For Azure OpenAI pass ``azure_endpoint`` and ``api_version``; ``model`` is then the *deployment* name.
     ``json_mode`` requests use ``response_format={"type": "json_object"}`` unless ``supports_json_mode=False``.
     """
+
+    #: the SDK retries transient errors with backoff, so LLM does not add its own retries
+    retries_internally = True
 
     def __init__(self, model: str, base_url: str | None = None, api_key: str | None = None, api_key_env: str = "OPENAI_API_KEY",
                  timeout: float = 120, max_retries: int = 5, supports_json_mode: bool = True, supports_seed: bool = True,
@@ -163,6 +168,8 @@ class OpenAICompatibleBackend:
             # 401 invalid key, 403 no access, 404 unknown model/deployment: retrying cannot help
             if getattr(e, "status_code", None) in (401, 403, 404):
                 raise BackendConfigError(f"openai {self.model}: {str(e)[:300]}") from e
+            if getattr(e, "status_code", None) in (400, 413, 422):
+                raise RequestRejectedError(f"openai {self.model}: {str(e)[:300]}") from e
             raise BackendError(f"openai {self.model}: {str(e)[:200]}") from e
         u = r.usage
         return ChatResult(text=r.choices[0].message.content or "", input_tokens=getattr(u, "prompt_tokens", 0) or 0,
@@ -177,6 +184,9 @@ class AnthropicBackend:
     this backend (cached answers still make reruns reproducible). ``thinking``/``effort`` default to a
     low-latency configuration suitable for short classification and judging calls.
     """
+
+    #: the SDK retries transient errors with backoff, so LLM does not add its own retries
+    retries_internally = True
 
     def __init__(self, model: str = "claude-haiku-5-5", api_key: str | None = None, thinking: dict | None = None,
                  effort: str | None = "low", max_tokens_cap: int = 4000, min_max_tokens: int = 256, timeout: float = 120,
@@ -245,6 +255,10 @@ class AnthropicBackend:
             r = client.messages.create(**kw)
         except (anthropic.AuthenticationError, anthropic.PermissionDeniedError, anthropic.NotFoundError) as e:
             raise BackendConfigError(f"anthropic {self.model}: {str(e)[:300]}") from e
+        except anthropic.APIStatusError as e:
+            if getattr(e, "status_code", None) in (400, 413, 422):
+                raise RequestRejectedError(f"anthropic {self.model}: {str(e)[:300]}") from e
+            raise BackendError(f"anthropic {self.model}: {str(e)[:200]}") from e
         except anthropic.APIError as e:
             raise BackendError(f"anthropic {self.model}: {str(e)[:200]}") from e
         except TypeError as e:   # raised by the SDK when no API key / auth method can be resolved

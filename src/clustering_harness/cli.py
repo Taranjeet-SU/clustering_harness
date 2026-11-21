@@ -286,7 +286,16 @@ def _main(argv=None) -> int:
         from .evaluation.metrics import external_metrics
         asg = pd.read_csv(a.assignments, dtype=str).fillna("")
         gold = pd.read_csv(a.gold, dtype=str).fillna("")
+        for col, frame, name in ((a.id_col, gold, "--gold"), (a.label_col, gold, "--gold"), ("ticket_id", asg, "--assignments"),
+                                 (a.level, asg, "--assignments")):
+            if col not in frame.columns:
+                raise ValueError(f"column {col!r} not in {name} file (columns: {', '.join(map(str, frame.columns))})")
         m = asg.merge(gold[[a.id_col, a.label_col]], left_on="ticket_id", right_on=a.id_col, how="inner")
+        if m.empty:
+            raise ValueError(f"no record ids match between {a.assignments} (ticket_id, e.g. {asg.ticket_id.head(2).tolist()}) "
+                             f"and {a.gold} ({a.id_col}, e.g. {gold[a.id_col].head(2).tolist()})")
+        if len(m) < len(asg):
+            print(f"warning: only {len(m)} of {len(asg)} assignment rows have a gold label", file=sys.stderr)
         print(json.dumps(external_metrics(m[a.label_col].tolist(), m[a.level].tolist()), indent=1, default=float))
         return 0
     if a.cmd == "reset":
@@ -306,6 +315,9 @@ def _main(argv=None) -> int:
         res = pipe.run(ds, until=a.until)
         if res is not None:
             print(json.dumps(res.summary, indent=1, default=str))
+            for slot, p in (res.summary.get("model_problems") or {}).items():
+                print(f"warning: model {slot}: {p['unparseable_answers']} unparseable answer(s), {p['rejected_requests']} "
+                      f"rejected request(s) of {p['requests']}; those items were treated as 'no answer'", file=sys.stderr)
         print(json.dumps({"spend": ledger.summary()}, indent=1))
         return 0
     if a.cmd == "multirun":

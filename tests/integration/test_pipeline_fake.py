@@ -139,7 +139,7 @@ def test_workdir_refuses_other_records_of_the_same_size(run):
     texts = list(ds.texts)
     texts[0] = texts[0] + " (edited)"
     other = type(ds)(ids=ds.ids, texts=texts, titles=ds.titles, labels=ds.labels, meta=ds.meta, name=ds.name)
-    with pytest.raises(ValueError, match="data_fingerprint"):
+    with pytest.raises(ValueError, match=r"data \(record ids"):
         Pipeline(config(), llms=llms, label_embedder=HashEmbedder(), vectors=X, workdir=wd).run(other)
 
 
@@ -148,7 +148,7 @@ def test_workdir_refuses_other_precomputed_vectors(run):
     llms, _ = fake_llms()
     X2 = X.copy()
     X2[0] = -X2[0]                       # same ids and texts, different vectors: must not reuse the cached embeddings
-    with pytest.raises(ValueError, match="vectors_fingerprint"):
+    with pytest.raises(ValueError, match="precomputed vectors"):
         Pipeline(config(), llms=llms, label_embedder=HashEmbedder(), vectors=X2, workdir=wd).run(ds)
 
 
@@ -191,7 +191,7 @@ def test_workdir_refuses_edited_prompts(run):
     llms, _ = fake_llms()
     p = PromptSet.load("default", domain=config().domain or None)
     p.templates["gate_system"] += "\nBe strict."
-    with pytest.raises(ValueError, match="prompts_fingerprint"):
+    with pytest.raises(ValueError, match=r"prompts \(file contents"):
         Pipeline(config(), llms=llms, label_embedder=HashEmbedder(), vectors=X, workdir=wd, prompts=p).run(ds)
 
 
@@ -319,3 +319,33 @@ def test_same_model_in_both_slots_warns(caplog, tmp_path):
     with caplog.at_level(logging.WARNING, logger="clustering_harness"):
         Pipeline(config(), llms={"a": LLM(be), "b": LLM(be)}, workdir=tmp_path / "w")
     assert "slots a and b use the same model" in caplog.text
+
+
+def test_reset_from_stage_keeps_the_guard(run, tmp_path):
+    ds, X, wd, *_ = run
+    import shutil
+    from clustering_harness.pipeline import reset_workdir
+    wd2 = tmp_path / "copy"
+    shutil.copytree(wd, wd2)
+    reset_workdir(wd2, "rollup")
+    assert (wd2 / "manifest.json").exists() and (wd2 / "results" / "scoring").exists()
+    # a rollup-only change is accepted now that rollup was removed ...
+    cfg = config()
+    cfg.rollup = cfg.rollup.model_copy(update={"target_max": 5})
+    llms, _ = fake_llms()
+    Pipeline(cfg, llms=llms, label_embedder=HashEmbedder(), vectors=X, workdir=wd2).run(ds)
+    # ... but other data on top of the kept stages is still refused, naming what changed and where to restart
+    reset_workdir(wd2, "rollup")
+    other = ds.subset(list(range(len(ds) - 1)))
+    llms, _ = fake_llms()
+    with pytest.raises(ValueError, match=r"(?s)data \(record ids.*--from-stage embed"):
+        Pipeline(cfg, llms=llms, label_embedder=HashEmbedder(), vectors=X[:-1], workdir=wd2).run(other)
+
+
+def test_guard_names_the_changed_setting(run):
+    ds, X, wd, *_ = run
+    cfg = config()
+    cfg.gate = cfg.gate.model_copy(update={"accept_mean": 3.9})
+    llms, _ = fake_llms()
+    with pytest.raises(ValueError, match=r"(?s)pipeline.gate.accept_mean: 3.6 -> 3.9.*--from-stage cascade"):
+        Pipeline(cfg, llms=llms, label_embedder=HashEmbedder(), vectors=X, workdir=wd).run(ds)

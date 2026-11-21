@@ -227,3 +227,63 @@ def test_budget_scope_shares_one_cap(tmp_path):
         for i in range(10):
             (a if i % 2 else b).call("s", [{"role": "user", "content": f"q{i}"}])
     assert led.spent("gpt-4o-mini") <= 0.01 + 1e-9
+
+
+def test_rejected_request_is_not_retried_cached_or_blocking(tmp_path):
+    from clustering_harness.llm import RequestRejectedError
+    calls = []
+
+    def fn(req):
+        calls.append(1)
+        if "too long" in req.messages[-1]["content"]:
+            raise RequestRejectedError("400 context length exceeded")
+        return '{"ok": 1}'
+
+    cache = ResponseCache(tmp_path / "c.sqlite")
+    llm = LLM(CallableBackend(fn, "m:1"), cache=cache)
+    out = llm.call("s", [{"role": "user", "content": "too long"}])
+    assert out.get("_rejected") and "_transport_error" not in out
+    assert len(calls) == 1                                         # no retry, no JSON repair request
+    assert llm.stats["rejected"] == 1 and llm.stats["uncached_failures"] == 0
+    assert cache.stage_counts() == {}
+    assert llm.call("s", MSG) == {"ok": 1}                         # other requests carry on
+
+
+def test_many_rejections_in_a_row_stop_the_model():
+    from clustering_harness.llm import RequestRejectedError
+
+    def fn(req):
+        raise RequestRejectedError("400 unsupported parameter")
+
+    llm = LLM(CallableBackend(fn, "m:1"), max_consecutive_failures=3)
+    with pytest.raises(ModelUnavailableError):
+        for i in range(5):
+            llm.call("s", [{"role": "user", "content": f"q{i}"}])
+
+
+def test_no_json_repair_request_after_a_transport_failure():
+    fl = Flaky()
+    llm = LLM(CallableBackend(fl, "down:1"), transport_retries=2)
+    llm.call("s", MSG)
+    assert fl.calls == 2                                           # two attempts, no third "fix your JSON" request
+
+
+def test_backends_that_retry_internally_get_one_attempt():
+    fl = Flaky()
+    be = CallableBackend(fl, "sdk:1")
+    be.retries_internally = True
+    LLM(be).call("s", MSG)
+    assert fl.calls == 1
+
+
+def test_callable_backends_need_a_price_for_a_budget():
+    with pytest.raises(ValueError, match="price of callable is unknown"):
+        LLM(CallableBackend(lambda r: "{}"), budget_usd=1.0)
+
+
+def test_unicode_text_is_not_junk():
+    from clustering_harness.data import JunkRule
+    j = JunkRule()
+    assert not j.is_junk("Не могу войти в аккаунт", "")
+    assert not j.is_junk("无法登录我的账户", "")
+    assert j.is_junk("test", "") and j.is_junk("hi", "")
