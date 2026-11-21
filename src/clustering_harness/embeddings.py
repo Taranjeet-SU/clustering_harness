@@ -218,10 +218,11 @@ class OllamaEmbedder:
 
 
 class OpenAIEmbedder:
-    def __init__(self, model: str = "text-embedding-3-small", base_url: str | None = None, api_key_env: str = "OPENAI_API_KEY",
+    def __init__(self, model: str = "text-embedding-3-small", base_url: str | None = None, api_key_env: str | None = "auto",
                  batch_size: int = 256, dimensions: int | None = None):
+        from .llm.backends import resolve_api_key
         self.model, self.base_url, self.batch_size, self.dimensions = model, base_url, batch_size, dimensions
-        self.api_key = os.environ.get(api_key_env)
+        self.api_key = resolve_api_key(api_key_env, base_url)   # never OPENAI_API_KEY for another host unless named
         self.name = f"openai-embed:{model}" + (f":{dimensions}" if dimensions else "")
 
     def encode(self, texts: Sequence[str]) -> np.ndarray:

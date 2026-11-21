@@ -20,6 +20,29 @@ __all__ = ["OllamaBackend", "OpenAICompatibleBackend", "AnthropicBackend", "Call
            "OfflineCallError"]
 
 
+def _is_openai_host(base_url: str | None) -> bool:
+    from urllib.parse import urlparse
+    return base_url is None or (urlparse(base_url).hostname or "").endswith("api.openai.com")
+
+
+def resolve_api_key(api_key_env: str | None, base_url: str | None = None, azure: bool = False) -> str:
+    """The key for an OpenAI-style client, read from ``api_key_env``.
+
+    ``"auto"`` means ``OPENAI_API_KEY`` when the requests go to OpenAI itself, ``AZURE_OPENAI_API_KEY`` for Azure,
+    and *no key* for any other server (a local vLLM / LM Studio needs none). Your OpenAI key is never sent to
+    another host unless you name it explicitly. A named variable that is not set is an error: the SDK would
+    otherwise silently fall back to ``OPENAI_API_KEY``."""
+    if api_key_env == "auto":
+        api_key_env = "AZURE_OPENAI_API_KEY" if azure else ("OPENAI_API_KEY" if _is_openai_host(base_url) else None)
+    if not api_key_env:
+        return "not-needed"           # the SDK requires a non-empty key; servers without auth ignore it
+    value = os.environ.get(api_key_env)
+    if not value:
+        raise BackendConfigError(f"the environment variable {api_key_env} (api_key_env) is not set"
+                                 + (f" (requests would go to {base_url})" if base_url else ""))
+    return value
+
+
 class OllamaBackend:
     """Ollama ``/api/chat``.
 
@@ -94,7 +117,10 @@ class OpenAICompatibleBackend:
     """OpenAI Chat Completions (``openai`` SDK). Works with OpenAI, Azure OpenAI and OpenAI-compatible servers.
 
     The key is taken from ``api_key``, else from ``api_key_provider`` (a callable or ``"module:function"`` returning
-    the key, called once when the client is created), else from the ``api_key_env`` environment variable.
+    the key, called once when the client is created), else from the ``api_key_env`` environment variable (see
+    :func:`resolve_api_key`: by default ``OPENAI_API_KEY`` only for OpenAI itself, no key for other servers, and an
+    error if a named variable is unset). The key is always passed explicitly, so the SDK never falls back to
+    ``OPENAI_API_KEY`` on its own.
     For Azure OpenAI pass ``azure_endpoint`` and ``api_version``; ``model`` is then the *deployment* name.
     ``json_mode`` requests use ``response_format={"type": "json_object"}`` unless ``supports_json_mode=False``.
     """
@@ -102,7 +128,7 @@ class OpenAICompatibleBackend:
     #: the SDK retries transient errors with backoff, so LLM does not add its own retries
     retries_internally = True
 
-    def __init__(self, model: str, base_url: str | None = None, api_key: str | None = None, api_key_env: str = "OPENAI_API_KEY",
+    def __init__(self, model: str, base_url: str | None = None, api_key: str | None = None, api_key_env: str | None = "auto",
                  timeout: float = 120, max_retries: int = 5, supports_json_mode: bool = True, supports_seed: bool = True,
                  token_param: str = "max_completion_tokens", api_key_provider=None, azure_endpoint: str | None = None,
                  api_version: str | None = None, default_headers: dict | None = None):
@@ -135,7 +161,7 @@ class OpenAICompatibleBackend:
         if self._api_key_provider is not None:
             from .bedrock import resolve_callable
             return resolve_callable(self._api_key_provider)()
-        return os.environ.get(self._api_key_env)
+        return resolve_api_key(self._api_key_env, self.base_url or self.azure_endpoint, azure=bool(self.azure_endpoint))
 
     def _get(self):
         with self._lock:
@@ -228,8 +254,10 @@ class AnthropicBackend:
                     from .bedrock import resolve_callable
                     key = resolve_callable(self._api_key_provider)()
                 key = key or os.environ.get(self._api_key_env)
-                if key:
-                    kw["api_key"] = key
+                if not key:   # never let the SDK fall back to ANTHROPIC_API_KEY for another variable or host
+                    raise BackendConfigError(f"anthropic {self.model}: the environment variable {self._api_key_env} "
+                                             f"(api_key_env) is not set")
+                kw["api_key"] = key
                 if self.base_url:
                     kw["base_url"] = self.base_url
                 self._client = anthropic.Anthropic(**kw)

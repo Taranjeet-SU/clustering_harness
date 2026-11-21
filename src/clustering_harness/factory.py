@@ -27,7 +27,7 @@ def _openai_like(kind):
             if "deployment" in s:
                 s["model"] = s.pop("deployment")
         return OpenAICompatibleBackend(
-            s.pop("model"), base_url=s.pop("base_url", None), api_key_env=s.pop("api_key_env", "OPENAI_API_KEY"),
+            s.pop("model"), base_url=s.pop("base_url", None), api_key_env=s.pop("api_key_env", "auto"),
             api_key_provider=s.pop("api_key_provider", None), azure_endpoint=s.pop("azure_endpoint", None),
             api_version=s.pop("api_version", None), default_headers=s.pop("default_headers", None),
             supports_json_mode=s.pop("json_mode", True), supports_seed=s.pop("seed", True), timeout=s.pop("timeout", 120),

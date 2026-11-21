@@ -241,7 +241,7 @@ models:
   # OpenAI (key from OPENAI_API_KEY)
   b: {backend: openai, model: gpt-4o-mini, concurrency: 8, budget_usd: 5}
 
-  # Any OpenAI-compatible server (vLLM, LM Studio, TGI, ...)
+  # Any OpenAI-compatible server (vLLM, LM Studio, TGI, ...): no key is sent unless you name one with api_key_env
   # a: {backend: openai_compatible, model: my-model, base_url: "http://gpu-box:8000/v1", api_key_env: VLLM_KEY}
 
   # Azure OpenAI: model is your deployment name (key from AZURE_OPENAI_API_KEY)
@@ -253,6 +253,11 @@ models:
   # Anthropic Claude (key from ANTHROPIC_API_KEY)
   # a: {backend: anthropic, model: claude-haiku-5-5}
 ```
+
+**Where keys go.** Each key is read from the variable named for that model and sent only to that model's
+server. `OPENAI_API_KEY` is used by default only for OpenAI itself; an `openai_compatible` server gets no key
+unless you set `api_key_env`. If a named variable (`api_key_env`, `GEMINI_API_KEY`, `AZURE_OPENAI_API_KEY`,
+`ANTHROPIC_API_KEY`) is not set, the model is refused before any request, instead of silently using another key.
 
 **Amazon Bedrock** supports every common way of signing in to AWS:
 
