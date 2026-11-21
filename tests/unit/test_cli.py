@@ -129,3 +129,25 @@ def test_evaluate_fails_when_no_ids_match(tmp_path, capsys):
     (tmp_path / "g.csv").write_text("id,label\n1,a\n2,b\n")
     assert main(["evaluate", "--assignments", str(tmp_path / "a.csv"), "--gold", str(tmp_path / "g.csv")]) == 2
     assert "no record ids match" in capsys.readouterr().err
+
+
+def test_pipeline_typos_get_suggestions(tmp_path, capsys):
+    (tmp_path / "d.csv").write_text("id,text\n1,a\n")
+    s = _spec(tmp_path, "workdir: w\ndata: {path: d.csv}\npipeline: {gate: {accept_men: 3}}\n" + MODELS)
+    assert main(["run", s]) == 2
+    assert "'pipeline.gate.accept_men' (did you mean 'pipeline.gate.accept_mean'?)" in capsys.readouterr().err
+
+
+def test_wrong_csv_column_is_named(tmp_path, capsys):
+    (tmp_path / "d.csv").write_text("id,body\n1,a\n")
+    s = _spec(tmp_path, "workdir: w\ndata: {path: d.csv, text_col: bdy}\n" + MODELS)
+    assert main(["run", s]) == 2
+    assert "column 'bdy' not found (did you mean 'body'?)" in capsys.readouterr().err
+
+
+def test_prompt_file_round_trip_keeps_the_domain(tmp_path):
+    from clustering_harness.prompts import PromptSet
+    f = tmp_path / "p.yaml"
+    PromptSet.load("default").to_yaml(f)
+    assert PromptSet.load(str(f), domain={"product": "Acme"}).fingerprint() == \
+        PromptSet.load("default", domain={"product": "Acme"}).fingerprint()

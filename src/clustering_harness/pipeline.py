@@ -38,11 +38,11 @@ log = logging.getLogger("clustering_harness")
 STAGE_FILES = {
     "embed": ("cache/embeddings.npy", "cache/embeddings.ids.json"),
     "bank": ("results/bank", "results/base", "cache/partitions", "cache/geom"),
-    "cascade": ("results/cascade_*", "results/cascade_log.json", "cache/cascade", "cache/gate_calibration.json"),
-    "residual": ("results/residual", "cache/residual"),
-    "refile": ("results/refile", "cache/refile"),
-    "scoring": ("results/scoring", "cache/scoring", "cache/scoring_evidence"),
-    "rollup": ("results/rollup",),
+    "cascade": ("results/cascade_*", "results/cascade_log.json", "cache/cascade", "cache/gate_calibration.json", "results/model_problems/cascade.json"),
+    "residual": ("results/residual", "cache/residual", "results/model_problems/residual.json"),
+    "refile": ("results/refile", "cache/refile", "results/model_problems/refile.json"),
+    "scoring": ("results/scoring", "cache/scoring", "cache/scoring_evidence", "results/model_problems/scoring.json"),
+    "rollup": ("results/rollup", "results/model_problems/rollup.json"),
     "export": ("output",),
 }
 
@@ -299,12 +299,16 @@ class Pipeline:
         return reset_workdir(self.workdir, from_stage)
 
     def _model_problems(self) -> dict:
-        """Per slot: answers that stayed unparseable and requests the provider rejected (only slots with problems)."""
-        out = {}
-        for k, m in self.llms.items():
-            cf, rj = m.stats.get("contract_failures", 0), m.stats.get("rejected", 0)
-            if cf or rj:
-                out[k] = {"unparseable_answers": cf, "rejected_requests": rj, "requests": m.stats.get("requests", 0)}
+        """Per slot: answers that stayed unparseable and requests the provider rejected in the *saved* stages (kept
+        across reruns; removed with their stage by ``reset``), with the stages they belong to."""
+        out: dict = {}
+        files = (self.workdir / "results" / "model_problems").glob("*.json")
+        for f in sorted(files, key=lambda f: STAGES.index(f.stem) if f.stem in STAGES else 99):
+            for slot, v in json.loads(f.read_text()).items():
+                o = out.setdefault(slot, {"unparseable_answers": 0, "rejected_requests": 0, "stages": []})
+                o["unparseable_answers"] += v["unparseable_answers"]
+                o["rejected_requests"] += v["rejected_requests"]
+                o["stages"].append(f.stem)
         return out
 
     # ------------------------------------------------------------------ failed-request guard
@@ -326,8 +330,12 @@ class Pipeline:
         return {p for p in wd.rglob("*") if p.is_file()
                 and not str(p.relative_to(wd)).replace("\\", "/").startswith(self._KEEP)}
 
+    def _problem_counts(self) -> dict:
+        return {k: (m.stats.get("contract_failures", 0), m.stats.get("rejected", 0)) for k, m in self.llms.items()}
+
     def _stage_start(self, stage: str) -> None:
         self._snap = (stage, self._failed_requests(), self._files())
+        self._problems0 = self._problem_counts()
 
     def _discard_failed_stage(self) -> int:
         """Remove the files written by the current stage if model requests failed during it; returns the count."""
@@ -349,6 +357,14 @@ class Pipeline:
     def _stage_end(self) -> None:
         stage = self._snap[0] if self._snap else "?"
         n = self._discard_failed_stage()
+        if not n and stage != "?":
+            # answers that stayed unparseable / were rejected are part of this saved stage: record them with it
+            now, before = self._problem_counts(), getattr(self, "_problems0", {})
+            delta = {k: {"unparseable_answers": now[k][0] - before.get(k, (0, 0))[0],
+                         "rejected_requests": now[k][1] - before.get(k, (0, 0))[1]} for k in now}
+            delta = {k: v for k, v in delta.items() if v["unparseable_answers"] or v["rejected_requests"]}
+            if delta:
+                write_json(delta, self.workdir / "results" / "model_problems" / f"{stage}.json")
         if n:
             raise IncompleteStageError(
                 f"stage {stage!r}: {n} model request(s) failed after retries (see the warnings above), so its results "
@@ -544,9 +560,10 @@ class Pipeline:
                    "wall_minutes_this_call": round((time.time() - T0) / 60, 1), "human_validated": False}
         write_json(summary, out_dir / "summary.json")
         for slot, p in summary["model_problems"].items():
-            log.warning("model %s (%s): %d unparseable answer(s) and %d rejected request(s) out of %d requests in this "
-                        "call; the affected records/clusters were handled as 'no answer' (see docs/backends.md)",
-                        slot, self.llms[slot].model_id, p["unparseable_answers"], p["rejected_requests"], p["requests"])
+            log.warning("model %s (%s): %d unparseable answer(s) and %d rejected request(s) in stage(s) %s; those items were "
+                        "handled as 'no answer'. To ask them again after fixing the cause: clustering-harness reset <spec> "
+                        "--from-stage %s", slot, self.llms[slot].model_id, p["unparseable_answers"], p["rejected_requests"],
+                        ", ".join(p["stages"]), p["stages"][0])
         for c in {id(m.cache): m.cache for m in self.llms.values() if m.cache is not None}.values():
             c.checkpoint()
         logs = {k: ctx.load("results", *k.split("/"), default=None) for k in ("cascade_log.json", "residual/log.json", "refile/log.json", "rollup/log.json")}

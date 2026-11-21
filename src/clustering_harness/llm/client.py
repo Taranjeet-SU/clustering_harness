@@ -97,7 +97,7 @@ class LLM:
                                  f"{backend.model_id} is unknown. Set price_in and price_out (USD per million tokens) "
                                  f"for this model in the run spec (or price=Price(in, out); 0 and 0 for a free model)")
         if budget_usd is None and price is None and self.price.input_per_mtok == 0 and self.price.output_per_mtok == 0 \
-                and backend.model_id.startswith(("openai:", "azure-openai:", "anthropic:", "bedrock:")):
+                and not backend.model_id.startswith(("ollama:", "offline", "callable")):
             log.warning("%s: no price is known for %s, so its spend is recorded as $0; set price_in / price_out to track it",
                         name or backend.model_id, backend.model_id)
         self.ledger = ledger
@@ -177,7 +177,9 @@ class LLM:
                     self._unavailable = (f"{self.name} ({self.model_id}) cannot be used: {msg}. Fix the model settings "
                                          f"and rerun; failed requests were not cached.")
                     raise ModelUnavailableError(self._unavailable) from None
-                except BackendError as e:
+                except Exception as e:  # noqa: BLE001 - BackendError, or anything a custom backend raises
+                    if not isinstance(e, BackendError):
+                        e = BackendError(f"{type(e).__name__}: {e}")
                     with self._stats_lock:
                         self.stats["failures"] += 1
                         self._last_error = redact(e)[:300]
@@ -290,13 +292,23 @@ class LLM:
         self._local.failed = False
         self._local.rejected = False
         try:
-            text = self.chat([{"role": "user", "content": 'Reply with the JSON object {"ok": true}.'}], max_tokens=400,
-                             json_mode=True, stage="preflight")
+            text = self.chat([{"role": "user", "content": 'Reply with the JSON object {"ok": true}.'}],
+                             max_tokens=1500 if self.reasoning else 400, json_mode=True, stage="preflight")
         finally:
             self.transport_retries = saved
         if getattr(self._local, "failed", False) or getattr(self._local, "rejected", False):
             self._give_up(f"{self.name} ({self.model_id}) did not answer a test request: {self._last_error}. Check the "
                           f"model name, key, server and network, then rerun.")
+        if (text or "").strip():
+            try:
+                extract_json(text)
+            except Exception:  # noqa: BLE001
+                self._give_up(f"{self.name} ({self.model_id}) answered a JSON test request with something that is not "
+                              f"JSON: {redact(text)[:120]!r}. The pipeline needs JSON answers: use a model that follows "
+                              f"instructions, or check the backend (json_mode, chat template)")
+        elif not self.reasoning:
+            log.warning("%s (%s): the test request got an empty answer; if this model reasons before answering, set "
+                        "reasoning: true", self.name, self.model_id)
         log.info("%s (%s): test request answered (%d chars)", self.name, self.model_id, len(text or ""))
 
     def __repr__(self) -> str:

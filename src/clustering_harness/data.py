@@ -29,11 +29,14 @@ _CJK = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-
 
 
 def alnum_count(s: str | None) -> int:
-    """Letters and digits in ``s``, in any script. A Chinese/Japanese/Korean character counts as 3, roughly one
+    """Letters, digits and combining marks (e.g. Indic and Thai vowel signs) in ``s``, in any script. A
+    Chinese/Japanese/Korean character counts as 3, roughly one
     word, because those scripts write a word in one or two characters. For ASCII text this equals the number of
     ASCII letters and digits."""
+    import unicodedata
     s = s or ""
-    return sum(1 for c in s if c.isalnum()) + 2 * len(_CJK.findall(s))
+    # letters, digits and combining marks (the vowel signs of Hindi, Thai, Bengali, ... are marks, not letters)
+    return sum(1 for c in s if c.isalnum() or unicodedata.category(c).startswith("M")) + 2 * len(_CJK.findall(s))
 
 
 def one_line(s: str | None, n: int) -> str:
@@ -193,7 +196,10 @@ class Dataset:
         """Build a dataset from a DataFrame. Columns other than id/text/title/label are kept as ``meta``."""
         for c in (id_col, text_col) + tuple(c for c in (title_col, label_col) if c):
             if c not in df.columns:
-                raise KeyError(f"column {c!r} not found; available: {list(df.columns)}")
+                import difflib
+                near = difflib.get_close_matches(str(c), [str(x) for x in df.columns], 1)
+                raise ValueError(f"column {c!r} not found" + (f" (did you mean {near[0]!r}?)" if near else "")
+                                 + f"; columns in the file: {list(df.columns)}")
         clean = clean or (lambda s: s)
         ids = df[id_col].astype(str).tolist()
         texts = [clean("" if pd.isna(x) else str(x)) for x in df[text_col]]

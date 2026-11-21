@@ -40,7 +40,7 @@ workdir: runs/my_run
 data:
   path: tickets.csv          # .csv / .tsv / .json / .jsonl / .parquet   (or:  dataset: banking77, split: test)
   # or MongoDB instead of path:   mongo: {{uri_env: MONGODB_URI, database: support, collection: [tickets],
-  #                                       query: {{status: closed}}, text_field: [subject, description], title_field: subject}}
+  #                                       query: {{status: closed}}, text_field: description, title_field: subject}}
   id_col: id
   text_col: text
   title_col: title           # optional
@@ -155,7 +155,25 @@ def build_config(p: dict, n: int):
     preset = p.pop("preset", "auto")
     base = {"small": PipelineConfig.small, "reference": PipelineConfig.reference}.get(preset)
     cfg = base() if base else PipelineConfig.auto(n)
-    return PipelineConfig.model_validate(_deep_merge(cfg.model_dump(), p))
+    from pydantic import ValidationError
+    try:
+        return PipelineConfig.model_validate(_deep_merge(cfg.model_dump(), p))
+    except ValidationError as e:
+        raise ValueError("invalid pipeline settings: " + "; ".join(_pydantic_hint(err, cfg) for err in e.errors())) from None
+
+
+def _pydantic_hint(err: dict, cfg) -> str:
+    """One readable line per pydantic error, with a "did you mean" for unknown keys."""
+    import difflib
+    loc = [str(x) for x in err.get("loc", ())]
+    where = "pipeline." + ".".join(loc)
+    if err.get("type") == "extra_forbidden":
+        node = cfg.model_dump()
+        for part in loc[:-1]:
+            node = node.get(part, {}) if isinstance(node, dict) else {}
+        near = difflib.get_close_matches(loc[-1], list(node) if isinstance(node, dict) else [], 1)
+        return f"unknown setting {where!r}" + (f" (did you mean {'pipeline.' + '.'.join(loc[:-1] + [near[0]])!r}?)" if near else "")
+    return f"{where}: {err.get('msg')} (got {err.get('input')!r})"
 
 
 def build_from_spec(spec: dict, ds=None, workdir: str | Path | None = None, config=None, ledger_path: str | Path | None = None):
@@ -317,7 +335,8 @@ def _main(argv=None) -> int:
             print(json.dumps(res.summary, indent=1, default=str))
             for slot, p in (res.summary.get("model_problems") or {}).items():
                 print(f"warning: model {slot}: {p['unparseable_answers']} unparseable answer(s), {p['rejected_requests']} "
-                      f"rejected request(s) of {p['requests']}; those items were treated as 'no answer'", file=sys.stderr)
+                      f"rejected request(s) in stage(s) {', '.join(p['stages'])}; those items were treated as 'no answer'. "
+                      f"To ask them again: clustering-harness reset {a.spec} --from-stage {p['stages'][0]}", file=sys.stderr)
         print(json.dumps({"spend": ledger.summary()}, indent=1))
         return 0
     if a.cmd == "multirun":
@@ -346,7 +365,13 @@ def _main(argv=None) -> int:
         X = np.load(Path(pipe.workdir) / "cache" / "embeddings.npy")
         parts = {"pipeline_clusters": res.labels("cluster")}
         if res.lines is not None:
-            parts["pipeline_lines"] = res.labels("line")
+            lines_lab, clus_lab = res.labels("line"), res.labels("cluster")
+            from sklearn.metrics import adjusted_rand_score
+            if adjusted_rand_score(clus_lab, lines_lab) < 1.0:     # identical partitions are compared (and judged) once
+                parts["pipeline_lines"] = lines_lab
+            else:
+                print("note: report lines equal the clusters (no merges), so pipeline_lines is not listed separately",
+                      file=sys.stderr)
         for b in a.baselines:
             name, kw = _parse_baseline(b)
             parts[b] = run_baseline(name, X, **kw)

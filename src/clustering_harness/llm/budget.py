@@ -39,13 +39,20 @@ PRICES_PER_MTOK: dict[str, Price] = {
 def price_for(model: str) -> Price:
     """Known price for a hosted model name, or zero (local / unknown models).
 
-    Provider-specific ids that contain a known name match it, e.g. the Bedrock id
-    ``us.anthropic.claude-haiku-5-5-v1:0`` is priced as ``claude-haiku-5-5`` (the longest matching name wins).
+    Provider-specific ids built from a known name match it, e.g. the Bedrock id
+    ``us.anthropic.claude-haiku-5-5-v1:0`` is priced as ``claude-haiku-5-5`` and ``gpt-4o-mini-2024-07-18`` as
+    ``gpt-4o-mini``. Near misses (``gpt-4o-mni``) and fine-tuned models (``ft:...``) are unknown.
     Prices differ by provider and region; pass an explicit :class:`Price` when it matters."""
+    import re
+    model = model or ""
     if model in PRICES_PER_MTOK:
         return PRICES_PER_MTOK[model]
+    if model.startswith("ft:") or ":ft:" in model:
+        return Price(0.0, 0.0)            # fine-tuned models are priced differently: give an explicit price
     for name in sorted(PRICES_PER_MTOK, key=len, reverse=True):
-        if name in (model or ""):
+        # the known name must stand alone: an optional provider prefix (``us.anthropic.``, ``openai/``) and an
+        # optional version / date / region suffix (``-2024-07-18``, ``-v1:0``, ``@latest``), nothing else
+        if re.search(r"(^|[./:])" + re.escape(name) + r"($|[-@:](v?\d|latest))", model):
             return PRICES_PER_MTOK[name]
     return Price(0.0, 0.0)
 
@@ -99,7 +106,8 @@ class Budget:
         spent = self.ledger.spent(self.scope)
         if spent + reserved + request_estimate > self.limit_usd or spent >= self.limit_usd:
             raise BudgetExceeded(f"budget for {self.scope!r} exhausted: ${spent:.4f} spent (+${reserved:.4f} in flight) "
-                                 f"of ${self.limit_usd:.2f}")
+                                 f"of ${self.limit_usd:.2f}. Raise budget_usd and rerun: finished work is cached, so "
+                                 f"you only pay for the rest")
 
     def remaining(self) -> float:
         return self.limit_usd - self.ledger.spent(self.scope)

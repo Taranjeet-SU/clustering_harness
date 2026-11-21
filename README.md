@@ -172,7 +172,7 @@ result.summary       # coverage, scores, model usage
 | **prompt preset** | the full set of instructions sent to the models. `default` is domain-neutral; you can copy it and add your own examples. |
 | **preset (`small` / `reference` / `auto`)** | algorithm settings tuned for about 1,000 (`small`) or about 15,000 (`reference`) records; `auto` picks by size. |
 | **workdir** | the folder a run writes to. It holds the caches, so rerunning the same spec continues where it stopped and costs nothing for work already done. `clustering-harness reset run.yaml` clears its results but keeps the model answers. |
-| **cache** | every good model answer is stored by its exact request (failed requests and unparseable answers are not). A repeated request is answered from the cache, which makes reruns cheap and reproducible. |
+| **cache** | every good model answer is stored by its exact request (failed requests and unparseable answers are not). A repeated request is answered from the cache, which makes reruns cheap and reproducible. It lives in `<workdir>/cache/llm.sqlite` (embeddings: `~/.cache/clustering_harness/embeddings`). |
 | **ledger** | a small database that records how much each model has cost, one row per request. |
 | **budget (`budget_usd`)** | a spending cap per model. When the ledger says the cap is reached, the run stops instead of overspending. |
 | **seed** | a number that fixes the random choices. Running several seeds (`multirun`) shows how stable the result is. |
@@ -197,8 +197,8 @@ ds = Dataset.from_mongo(
     uri_env="MONGODB_URI",                     # read the connection string from this environment variable
     database="support",
     query={"status": "closed"},                # or queries={"tickets_2025": {...}, "tickets_2026": {...}}
-    text_field=["subject", "body.text"],       # several fields are joined; dotted paths reach nested fields
-    title_field="subject",
+    text_field=["body.text", "resolution"],    # the description: several fields are joined; dotted paths reach nested fields
+    title_field="subject",                     # the title is added to the text automatically; don't repeat it above
     label_field="category",                    # optional gold labels for evaluation
     meta_fields=["product", "priority"],       # kept as extra columns
     limit=5000,                                # read at most 5,000 documents, collections in the order given
@@ -220,7 +220,7 @@ data:
     database: support
     collections: [tickets_2025, tickets_2026]
     query: '{"created": {"$gte": {"$date": "2026-01-01T00:00:00Z"}}}'   # MongoDB Extended JSON for dates and ObjectIds
-    text_field: [subject, description]
+    text_field: description             # the body; the title is combined with it automatically
     title_field: subject
 ```
 
@@ -296,7 +296,10 @@ def bedrock_credentials() -> dict:
 The dict may also use the STS spellings (`AccessKeyId`, `SecretAccessKey`, `SessionToken`, `Expiration`),
 so the `Credentials` block of an `assume_role` answer can be returned as it is.
 
-**Your own model loader.** Any object with a `model_id` and a `complete(request)` method is a backend. Use it
+**Your own model loader.** Any object with a `model_id` and a `complete(request)` method is a backend. To
+control failure handling, raise `BackendConfigError` for problems retrying cannot fix (bad key, unknown model),
+`RequestRejectedError` for a request the server refuses as invalid, and `BackendError` for temporary problems
+(all from `clustering_harness.llm`); any other exception is treated as temporary and retried once. Use it
 from a spec by its import path, register it under a short name, or publish it from your own package:
 
 ```yaml
@@ -423,9 +426,9 @@ Everything lands in `<workdir>/output/`:
 
 | file | what's inside |
 |---|---|
-| `report_lines.csv` | the short list: `line_id`, `line_name`, `criterion` (the rule), `tickets`, `n_clusters`, `judge_score`, `round_formed`, `cluster_ids`, `cluster_names` |
-| `clusters.csv` | per cluster: `cluster_name`, `inclusion_criterion` / `exclusion_criterion`, `case_count`, duplicate-text counts, geometry (`cosine_silhouette_mean`, centroid cosines, `nearest_cluster_id`, ...: how tight and separate it is), quality scores 1–5 (`semantic_score_1_to_5` and per judge, `label_fit`, `distinction`, `judge_disagreement`), `example_case_ids`, `suspicious_sample_ids`, `semantic_reasons`, and `quality_status` (`MODEL_REVIEW_PASSED` or `REVIEW_RECOMMENDED`) |
-| `assignments.csv` | per record: `ticket_id`, `title`, `cluster_id` / `cluster_name`, `line_id` / `line_name`, `status` (`cluster` / `unassigned` / `junk`), `placement` (how it got its cluster, below), `reason` (why it was *not* clustered: `junk`, `not placed`, `LLM junk: ...`; empty for clustered records) and `previous_reason` (the reason before the refile pass) |
+| `report_lines.csv` | the short list: `line_id`, `line_name`, `criterion` (the rule), `tickets`, `n_clusters`, `judge_score`, `round_formed` (the merge round that formed the line; -1 = a single cluster kept as is), `cluster_ids`, `cluster_names` |
+| `clusters.csv` | per cluster: `cluster_name`, `inclusion_criterion` / `exclusion_criterion`, `case_count`, duplicate-text counts, geometry (`cosine_silhouette_mean`, centroid cosines, `nearest_cluster_id`, ...: how tight and separate it is), quality scores 1–5 (`semantic_score_1_to_5` and per judge, `label_fit`, `distinction`, `judge_disagreement`), `example_case_ids`, `suspicious_sample_ids`, `semantic_reasons`, and `quality_status`: `MODEL_REVIEW_PASSED` when both judges accepted every sampled panel with scores of at least 4 and no suspicious records were found, otherwise `REVIEW_RECOMMENDED` (a person should look at it) |
+| `assignments.csv` | per record: `ticket_id`, `title`, `cluster_id` / `cluster_name`, `line_id` / `line_name`, `status` (`cluster` / `unassigned` / `junk`), `placement` (how it got its cluster, below), `reason` (why it was *not* clustered: `junk` = removed up front by the junk rule; `LLM junk: ...` = a model judged the record unusable while filing left-overs, with its reason; `not placed` = no cluster fitted; empty for clustered records) and `previous_reason` (the reason before the refile pass) |
 | `summary.json` | coverage, mean scores, model usage, and `model_problems` (answers that stayed unparseable and requests the provider rejected, per slot; also printed as a warning) |
 
 `placement` values: `cascade_B` (placed by the clustering cascade), `filed_existing_confirmed` (filed into an

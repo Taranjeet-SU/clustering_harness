@@ -6,7 +6,7 @@
         database="support",
         collection=["tickets_2025", "tickets_2026"],
         query={"status": "closed", "created": {"$gte": {"$date": "2026-01-01T00:00:00Z"}}},
-        text_field=["subject", "description"],  # several fields are joined into one text
+        text_field=["description", "resolution"],  # several fields are joined into one text (the title is separate)
         title_field="subject",
         meta_fields=["product", "priority"],
     )
@@ -63,12 +63,15 @@ def _as_text(v) -> str:
     return str(v)
 
 
-def _ejson(x):
+def _ejson(x, what: str = "query"):
     """Extended-JSON strings (and dicts/lists written in Extended JSON) -> BSON-ready Python objects."""
     if x is None:
         return None
     from bson import json_util
-    return json_util.loads(x if isinstance(x, str) else json.dumps(x))
+    try:
+        return json_util.loads(x if isinstance(x, str) else json.dumps(x, default=str))
+    except Exception as e:  # noqa: BLE001
+        raise ValueError(f"data.mongo {what} is not valid (Extended) JSON: {e}; got {str(x)[:120]!r}") from None
 
 
 def load_mongo_frame(collection: str | list[str], database: str | None = None, uri: str | None = None,
@@ -102,8 +105,8 @@ def load_mongo_frame(collection: str | list[str], database: str | None = None, u
             raise ValueError("no database given: set `database:` or put the database name in the connection string") from None
         if id_with_collection is None:
             id_with_collection = len(colls) > 1
-        base_q = _ejson(query) or {}
-        pipe = _ejson(pipeline) if pipeline is not None else None
+        base_q = _ejson(query, "query") or {}
+        pipe = _ejson(pipeline, "pipeline") if pipeline is not None else None
         if isinstance(sort, dict):
             sort = list(sort.items())
         proj = projection
@@ -143,7 +146,7 @@ def load_mongo_frame(collection: str | list[str], database: str | None = None, u
                 stages = list(pipe) + ([{"$limit": left}] if left is not None else [])
                 cursor = coll.aggregate(stages, allowDiskUse=True)
             else:
-                q = _ejson((queries or {}).get(name)) if queries and name in queries else base_q
+                q = _ejson((queries or {}).get(name), f"queries[{name!r}]") if queries and name in queries else base_q
                 cursor = coll.find(q, proj)
                 if sort:
                     cursor = cursor.sort(sort)

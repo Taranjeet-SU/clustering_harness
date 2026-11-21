@@ -287,3 +287,37 @@ def test_unicode_text_is_not_junk():
     assert not j.is_junk("Не могу войти в аккаунт", "")
     assert not j.is_junk("无法登录我的账户", "")
     assert j.is_junk("test", "") and j.is_junk("hi", "")
+
+
+def test_custom_backend_exceptions_are_retried_not_fatal():
+    calls = []
+
+    def fn(req):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ConnectionError("HTTP 500")
+        return '{"ok": 1}'
+
+    llm = LLM(CallableBackend(fn, "custom:1"))
+    assert llm.call("s", MSG) == {"ok": 1} and len(calls) == 2
+
+
+def test_preflight_rejects_non_json_answers():
+    llm = LLM(CallableBackend(lambda r: "Sure! Happy to help.", "chatty:1"), name="a")
+    with pytest.raises(ModelUnavailableError, match="not JSON"):
+        llm.preflight()
+
+
+def test_prices_match_only_real_variants():
+    from clustering_harness.llm import price_for
+    assert price_for("gpt-4o-mini-2024-07-18") == price_for("gpt-4o-mini")
+    assert price_for("us.anthropic.claude-haiku-5-5-v1:0") == price_for("claude-haiku-5-5")
+    assert price_for("gpt-4o-mni") == Price(0, 0)                  # a typo is not gpt-4o
+    assert price_for("ft:gpt-4o-mini:org::x") == Price(0, 0)       # fine-tunes need an explicit price
+
+
+def test_indic_and_thai_text_is_not_junk():
+    from clustering_harness.data import JunkRule
+    j = JunkRule()
+    assert not j.is_junk("मेरा कार्ड खो गया", "")
+    assert not j.is_junk("บัตรของฉันหาย", "")

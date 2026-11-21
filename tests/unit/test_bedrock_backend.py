@@ -267,3 +267,10 @@ def test_region_comes_from_the_aws_profile(monkeypatch, tmp_path):
     monkeypatch.setenv("AWS_CONFIG_FILE", str(cfg))
     be = BedrockBackend("m", profile_name="research", credentials={"aws_access_key_id": "AKIA1", "aws_secret_access_key": "s"})
     assert be._resolve()["region"] == "eu-west-3"
+
+
+def test_provider_model_override_is_known_before_the_first_request():
+    be = BedrockBackend("configured-model", region="us-east-1",
+                        credentials_provider=lambda: {"aws_access_key_id": "AKIA1", "aws_secret_access_key": "s",
+                                                      "model_id": "us.anthropic.claude-haiku-5-5-v1:0"})
+    assert be.model_id == "bedrock:us.anthropic.claude-haiku-5-5-v1:0"   # cache key, price and budget use the real model

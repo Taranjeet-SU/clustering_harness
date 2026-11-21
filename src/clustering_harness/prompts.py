@@ -46,6 +46,9 @@ def list_presets() -> list[str]:
 class PromptSet:
     templates: dict = field(default_factory=dict)
     name: str = "custom"
+    #: the domain values and the templates before they were filled in (what :meth:`to_yaml` writes)
+    domain: dict = field(default_factory=dict)
+    raw_templates: dict = field(default_factory=dict)
 
     def __post_init__(self):
         missing = [k for k in REQUIRED_TEMPLATES if k not in self.templates]
@@ -106,11 +109,15 @@ class PromptSet:
                              for k in unknown)
             raise ValueError(f"domain key(s) not used by prompt set {name!r}: {hint}. Keys it uses: "
                              f"{', '.join(sorted(dict(data.get('domain', {}))))}")
+        raw = dict(tpls)
         # domain variables are substituted once at load time; data slots stay for render()
         if dom:
             pat = re.compile(r"\{\{(" + "|".join(map(re.escape, dom)) + r")\}\}")
             tpls = {k: pat.sub(lambda m: str(dom[m.group(1)]), v) for k, v in tpls.items()}
-        return cls(templates=tpls, name=name)
+        return cls(templates=tpls, name=name, domain=dom, raw_templates=raw)
 
     def to_yaml(self, path: str | Path) -> None:
-        Path(path).write_text(yaml.safe_dump({"templates": self.templates}, sort_keys=False, allow_unicode=True, width=10_000))
+        """Write an editable prompt file: the ``domain`` block and the templates with their ``{{...}}`` slots, so it
+        loads back with ``PromptSet.load(path, domain=...)`` and a spec's ``domain:`` still applies."""
+        data = {"domain": dict(self.domain), "templates": dict(self.raw_templates or self.templates)}
+        Path(path).write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True, width=10_000))

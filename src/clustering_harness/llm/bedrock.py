@@ -128,6 +128,16 @@ class BedrockBackend:
         self.max_retries = max_retries
         self.refresh_margin_seconds = refresh_margin_seconds
         self.endpoint_url = endpoint_url
+        if self._provider is not None:
+            # the provider may name the model (model_id / inference_profile_arn): ask it now, so that cache keys,
+            # prices and budgets use the model that will really answer
+            try:
+                raw = self._provider()
+                got = _normalise(raw or {})
+            except Exception as e:  # noqa: BLE001
+                raise BackendConfigError(f"bedrock credentials_provider failed: {type(e).__name__}: {str(e)[:200]}") from None
+            self.model = got.get("inference_profile_arn") or got.get("model_id") or self.model
+            self._first_answer = raw          # reused by the first client build, so the provider is not asked twice
         self.model_id = f"bedrock:{self.model}"
         self._client = None
         self._expires_at: float | None = None
@@ -146,12 +156,17 @@ class BedrockBackend:
     def _resolve(self) -> dict:
         creds = dict(self._static)
         if self._provider is not None:
-            got = self._provider()
+            got, self._first_answer = (self._first_answer, None) if getattr(self, "_first_answer", None) is not None \
+                else (self._provider(), None)
             if not isinstance(got, dict):
                 raise BackendConfigError("bedrock credentials_provider must return a dict")
             creds.update(_normalise(got))
             if "inference_profile_arn" in creds or "model_id" in creds:
-                self.model = creds.pop("inference_profile_arn", None) or creds.pop("model_id")
+                new = creds.pop("inference_profile_arn", None) or creds.pop("model_id")
+                if new != self.model:
+                    raise BackendConfigError(f"bedrock credentials_provider switched the model from {self.model!r} to "
+                                             f"{new!r} during the run; cached answers and budgets are per model, so "
+                                             f"restart with the new model")
         if "aws_bearer_token_bedrock" not in creds and "aws_access_key_id" not in creds and os.environ.get(self.bearer_token_env):
             creds["aws_bearer_token_bedrock"] = os.environ[self.bearer_token_env]
         creds.setdefault("region", self.region or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION"))

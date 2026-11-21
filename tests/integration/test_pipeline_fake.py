@@ -349,3 +349,25 @@ def test_guard_names_the_changed_setting(run):
     llms, _ = fake_llms()
     with pytest.raises(ValueError, match=r"(?s)pipeline.gate.accept_mean: 3.6 -> 3.9.*--from-stage cascade"):
         Pipeline(cfg, llms=llms, label_embedder=HashEmbedder(), vectors=X, workdir=wd).run(ds)
+
+
+def test_model_problems_survive_a_cached_rerun(run, tmp_path):
+    ds, X, *_ = run
+    import zlib
+    from clustering_harness.llm import RequestRejectedError
+    llms, _ = fake_llms()
+    good = llms["b"].backend.fn
+
+    def picky(req):
+        if zlib.crc32(str(req.messages[-1]["content"]).encode()) % 7 == 0 and "ok" not in str(req.messages[-1]["content"]):
+            raise RequestRejectedError("400 content filter")
+        return good(req)
+
+    llms["b"].backend.fn = picky
+    wd = tmp_path / "w"
+    res = Pipeline(config(), llms=llms, label_embedder=HashEmbedder(), vectors=X, workdir=wd).run(ds)
+    probs = res.summary["model_problems"]
+    assert probs["b"]["rejected_requests"] > 0
+    llms2, _ = fake_llms()
+    res2 = Pipeline(config(), llms=llms2, label_embedder=HashEmbedder(), vectors=X, workdir=wd).run(ds)
+    assert res2.summary["model_problems"] == probs                  # still reported after a cached rerun
