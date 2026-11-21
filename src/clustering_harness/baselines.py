@@ -106,13 +106,13 @@ def agglomerative_cosine_average(X: np.ndarray, random_state: int = 0, k: int | 
                                  distance_threshold: float | None = None) -> np.ndarray:
     """Average-linkage agglomerative clustering on cosine distance. Give exactly one of ``k`` or
     ``distance_threshold`` (cosine distance = 1 - cosine similarity, at which merging stops)."""
-    from sklearn.cluster import AgglomerativeClustering
+    from ._compat import agglomerative
 
     if (k is None) == (distance_threshold is None):
         raise ValueError("agglomerative_cosine_average requires exactly one of k or distance_threshold")
     X = l2_normalize(_check_X(X))
-    model = AgglomerativeClustering(n_clusters=None if k is None else int(k), distance_threshold=distance_threshold,
-                                    metric="cosine", linkage="average")
+    model = agglomerative(None if k is None else int(k), metric="cosine", distance_threshold=distance_threshold,
+                          linkage="average")
     return canonicalize_labels(model.fit_predict(X))
 
 

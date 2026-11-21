@@ -136,7 +136,7 @@ class Rollup:
             byn.setdefault(_norm(u["name"]), []).append(k)
         props = [(ks, "identical name") for ks in byn.values() if len(ks) >= 2]
         acc = guard(props, 0); apply(acc, 0); stats.append(rstat(0, len(props), len(acc)))
-        from sklearn.cluster import AgglomerativeClustering
+        from .._compat import agglomerative
         for r in range(1, len(R.thresholds)):
             if len(units) <= R.target_max:
                 break
@@ -150,7 +150,7 @@ class Rollup:
             def groups(idx, th):
                 if len(idx) < 2:
                     return []
-                lab = AgglomerativeClustering(None, metric="precomputed", linkage="average", distance_threshold=th).fit_predict(D[np.ix_(idx, idx)])
+                lab = agglomerative(None, metric="precomputed", linkage="average", distance_threshold=th).fit_predict(D[np.ix_(idx, idx)])
                 out = []
                 for l_ in set(lab):
                     sub = [idx[i] for i in np.where(lab == l_)[0]]

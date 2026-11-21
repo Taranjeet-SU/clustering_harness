@@ -143,6 +143,15 @@ def test_workdir_refuses_other_records_of_the_same_size(run):
         Pipeline(config(), llms=llms, label_embedder=HashEmbedder(), vectors=X, workdir=wd).run(other)
 
 
+def test_workdir_refuses_other_precomputed_vectors(run):
+    ds, X, wd, *_ = run
+    llms, _ = fake_llms()
+    X2 = X.copy()
+    X2[0] = -X2[0]                       # same ids and texts, different vectors: must not reuse the cached embeddings
+    with pytest.raises(ValueError, match="vectors_fingerprint"):
+        Pipeline(config(), llms=llms, label_embedder=HashEmbedder(), vectors=X2, workdir=wd).run(ds)
+
+
 def test_workdir_refuses_other_models(run):
     ds, X, wd, *_ = run
     from clustering_harness.llm import LLM, CallableBackend

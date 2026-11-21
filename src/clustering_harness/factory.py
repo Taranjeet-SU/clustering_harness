@@ -82,7 +82,10 @@ def _load_entry_points():
         return
     _EP_LOADED = True
     from importlib.metadata import entry_points
-    for ep in entry_points(group="clustering_harness.backends"):
+    eps = entry_points()
+    group = (eps.select(group="clustering_harness.backends") if hasattr(eps, "select")      # Python 3.10+
+             else eps.get("clustering_harness.backends", []))                              # Python 3.9
+    for ep in group:
         _BACKENDS.setdefault(ep.name, ep.load())
 
 

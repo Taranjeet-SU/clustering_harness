@@ -161,9 +161,9 @@ class ResidualPass:
         ctx.progress(cache_key, stage="canonicalising", provisional=len(labels), filed=len(filed), junk=len(junk))
 
         # 1. canonicalise ------------------------------------------------------
-        from sklearn.cluster import AgglomerativeClustering
+        from .._compat import agglomerative
         LV = ctx.label_vectors(labels, f"{cache_key}_prov_labels") if labels else np.zeros((0, 1024))
-        grp = (AgglomerativeClustering(None, metric="cosine", linkage="average", distance_threshold=R.canon_distance).fit_predict(LV)
+        grp = (agglomerative(None, metric="cosine", linkage="average", distance_threshold=R.canon_distance).fit_predict(LV)
                if len(labels) > 1 else np.zeros(len(labels), int))
         order = np.argsort(grp, kind="stable")
         chunks = [order[i:i + R.canon_chunk] for i in range(0, len(order), R.canon_chunk)]

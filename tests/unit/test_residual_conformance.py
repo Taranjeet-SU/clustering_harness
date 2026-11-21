@@ -202,9 +202,9 @@ def test_canonicalisation_pregrouping_and_chunks(tmp_path):
     st = ctx.load("cache", "residual", "stream_0.json")
     labels = st["prov"]
     assert len(labels) == 65
-    from sklearn.cluster import AgglomerativeClustering
+    from clustering_harness._compat import agglomerative
     LV = HashEmbedder().encode(labels)
-    grp = AgglomerativeClustering(None, metric="cosine", linkage="average", distance_threshold=0.2).fit_predict(LV)
+    grp = agglomerative(None, metric="cosine", linkage="average", distance_threshold=0.2).fit_predict(LV)
     order = np.argsort(grp, kind="stable")
     reqs = fk["b"].of("canonicalise")
     # consecutive chunks of <= 30 labels of the stable group order (chunks run in parallel, so compare as a set)
