@@ -49,7 +49,9 @@ check, split, name and fill them, and keeps a record of every decision so you ca
 
 The package is not on PyPI yet; install it from GitHub. You need Python 3.9 or newer. The
 oldest stack the test suite runs on (in CI) is Python 3.9 with numpy 1.22, pandas 1.1.5, scikit-learn 0.24.2 and
-pydantic 2.13, so the package can be installed into an older service without upgrading its scientific libraries.
+pydantic 2.13 (and requests 2.26, PyYAML 5.4), so the package can be installed into an older service without
+upgrading its scientific libraries. On scikit-learn older than 1.6, pin `hdbscan==0.8.40`: newer hdbscan releases
+require scikit-learn 1.6 and pip would upgrade it.
 
 ```bash
 git clone https://github.com/Taranjeet-SU/clustering_harness.git
